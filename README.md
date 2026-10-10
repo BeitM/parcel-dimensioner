@@ -100,6 +100,12 @@ data/captures/                  Local captures (ignored by Git)
 
 ## Configuration
 
+For guided lens-calibration image collection with locked focus, run
+`parcel-dimensioner camera calibration-capture --preview-backend qtgl` on the Pi
+desktop. Move one board while the camera stays fixed and press Enter for each
+image. See [the collection guide](docs/pi-camera-setup.md#lens-calibration-image-collection)
+for focus reuse, fixed-wall setups, and saved session metadata.
+
 Defaults live in [`config/parcel-dimensioner.toml`](config/parcel-dimensioner.toml).
 Use another file with `--config PATH` or the `PARCEL_DIMENSIONER_CONFIG`
 environment variable. Command-line camera settings override the file for that

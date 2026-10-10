@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import tomllib
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ class CameraSettings:
     height: int = 1080
     warmup_seconds: float = 2.0
     preview_backend: str = "auto"
+    lens_position: float | None = None
 
     def __post_init__(self) -> None:
         if self.index < 0:
@@ -32,6 +34,12 @@ class CameraSettings:
             raise SettingsError("camera width and height must be greater than zero")
         if self.warmup_seconds < 0:
             raise SettingsError("camera.warmup_seconds must be zero or greater")
+        if self.lens_position is not None and (
+            not isinstance(self.lens_position, (int, float))
+            or not math.isfinite(self.lens_position)
+            or self.lens_position < 0
+        ):
+            raise SettingsError("camera.lens_position must be a finite nonnegative number")
         if self.preview_backend not in PREVIEW_BACKENDS:
             choices = ", ".join(sorted(PREVIEW_BACKENDS))
             raise SettingsError(f"camera.preview_backend must be one of: {choices}")
@@ -72,7 +80,7 @@ def load_settings(path: Path | None = None) -> AppSettings:
         raise SettingsError("camera must be a TOML table")
     _reject_unknown(
         camera_raw,
-        {"index", "width", "height", "warmup_seconds", "preview_backend"},
+        {"index", "width", "height", "warmup_seconds", "preview_backend", "lens_position"},
         "camera",
     )
 

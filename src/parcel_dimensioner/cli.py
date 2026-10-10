@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from collections.abc import Sequence
 from dataclasses import asdict, replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 from parcel_dimensioner.camera.contracts import CameraError
@@ -47,6 +49,15 @@ def build_parser() -> argparse.ArgumentParser:
     preview.add_argument("--height", type=_positive_int)
     preview.add_argument("--camera-index", type=_nonnegative_int)
     preview.add_argument("--preview-backend", choices=sorted(PREVIEW_BACKENDS))
+    preview.add_argument("--lens-position", type=_nonnegative_float)
+
+    calibration = camera_commands.add_parser(
+        "calibration-capture", help="collect lens-calibration images with locked focus"
+    )
+    calibration.add_argument("--output-dir", type=Path, help="new directory for this session")
+    calibration.add_argument("--count", type=_positive_int, default=25)
+    calibration.add_argument("--preview-backend", choices=sorted(PREVIEW_BACKENDS))
+    _add_capture_overrides(calibration)
     return parser
 
 
@@ -55,7 +66,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         settings = load_settings(args.config)
         camera_settings = _camera_settings_with_overrides(settings.camera, args)
-        backend = Picamera2Backend(camera_settings.index)
+        backend = Picamera2Backend(camera_settings.index, camera_settings.lens_position)
 
         if args.camera_command == "doctor":
             return _doctor(camera_settings.index)
@@ -63,6 +74,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _list_cameras(backend)
         if args.camera_command == "snapshot":
             return _snapshot(backend, settings, camera_settings, args.output)
+        if args.camera_command == "calibration-capture":
+            output_dir = args.output_dir or settings.captures_dir / (
+                "calibration-" + datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
+            )
+            saved = backend.capture_calibration(
+                output_dir,
+                width=camera_settings.width,
+                height=camera_settings.height,
+                warmup_seconds=camera_settings.warmup_seconds,
+                preview_backend=camera_settings.preview_backend,
+                count=args.count,
+            )
+            print(f"Saved {saved} images in {output_dir}. Calibration has not been solved yet.")
+            return 0 if saved else 1
         if args.camera_command == "preview":
             print("Opening preview; press Ctrl+C to close.")
             backend.preview(
@@ -119,6 +144,7 @@ def _add_capture_overrides(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--height", type=_positive_int)
     parser.add_argument("--warmup", type=_nonnegative_float)
     parser.add_argument("--camera-index", type=_nonnegative_int)
+    parser.add_argument("--lens-position", type=_nonnegative_float)
 
 
 def _camera_settings_with_overrides(
@@ -130,6 +156,7 @@ def _camera_settings_with_overrides(
         "height": getattr(args, "height", None),
         "warmup_seconds": getattr(args, "warmup", None),
         "preview_backend": getattr(args, "preview_backend", None),
+        "lens_position": getattr(args, "lens_position", None),
     }
     return replace(settings, **{name: value for name, value in values.items() if value is not None})
 
@@ -150,8 +177,8 @@ def _nonnegative_int(raw: str) -> int:
 
 def _nonnegative_float(raw: str) -> float:
     value = float(raw)
-    if value < 0:
-        raise argparse.ArgumentTypeError("must be zero or greater")
+    if not math.isfinite(value) or value < 0:
+        raise argparse.ArgumentTypeError("must be finite and zero or greater")
     return value
 
 

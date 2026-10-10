@@ -10,3 +10,6 @@ height = 1080
 warmup_seconds = 2.0
 preview_backend = "auto"
 
+# After calibration capture, uncomment and replace with its reported locked value.
+# lens_position = 1.0
+
