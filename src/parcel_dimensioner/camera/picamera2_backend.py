@@ -130,7 +130,11 @@ class Picamera2Backend:
             # Refuse an existing directory so a previous dataset cannot be overwritten.
             output_dir.mkdir(parents=True, exist_ok=False)
             camera = module.Picamera2(self.camera_index)
-            camera.configure(camera.create_still_configuration(main={"size": (width, height)}))
+            camera.configure(
+                camera.create_still_configuration(
+                    main={"size": (width, height)}, display="main", buffer_count=4
+                )
+            )
             if self.lens_position is not None:
                 _set_manual_focus(camera, self.lens_position)
             camera.start_preview(_preview_type(module, preview_backend))

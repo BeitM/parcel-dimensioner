@@ -96,6 +96,10 @@ def test_autofocus_once_then_manual_across_session(tmp_path, monkeypatch, fake_c
     assert collect(folder) == 2
     manifest = json.loads((folder / "session.json").read_text())
     assert fake_camera.af_calls == 1
+    # Picamera2's still defaults have no display stream and insufficient buffers
+    # for a continuously held GL preview request. Collection must override both.
+    assert fake_camera.configuration["display"] == "main"
+    assert fake_camera.configuration["buffer_count"] >= 2
     assert fake_camera.controls == [{"AfMode": "manual", "LensPosition": 1.25}]
     assert manifest["image_size"] == [640, 480]
     assert manifest["lens_position"] == 1.25
