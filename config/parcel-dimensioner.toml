@@ -1,0 +1,12 @@
+# Safe initial values for camera bring-up. These are capture settings, not the
+# final calibrated measurement settings.
+
+captures_dir = "data/captures"
+
+[camera]
+index = 0
+width = 1920
+height = 1080
+warmup_seconds = 2.0
+preview_backend = "auto"
+

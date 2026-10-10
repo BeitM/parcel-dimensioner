@@ -206,6 +206,11 @@ tempCodeRunnerFile.py
 # Ruff stuff:
 .ruff_cache/
 
+# Parcel Dimensioner runtime data and local overrides
+data/captures/*
+!data/captures/.gitkeep
+config/local.toml
+
 # PyPI configuration file
 .pypirc
 

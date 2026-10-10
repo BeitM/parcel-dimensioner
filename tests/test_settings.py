@@ -1,0 +1,45 @@
+from pathlib import Path
+
+import pytest
+
+from parcel_dimensioner.settings import AppSettings, SettingsError, load_settings
+
+
+def test_missing_implicit_config_uses_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    assert load_settings() == AppSettings()
+
+
+def test_loads_camera_settings(tmp_path: Path) -> None:
+    config = tmp_path / "test.toml"
+    config.write_text(
+        """
+captures_dir = "captures"
+[camera]
+index = 1
+width = 1280
+height = 720
+warmup_seconds = 1.5
+preview_backend = "drm"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    settings = load_settings(config)
+
+    assert settings.captures_dir == Path("captures")
+    assert settings.camera.index == 1
+    assert settings.camera.width == 1280
+    assert settings.camera.height == 720
+    assert settings.camera.warmup_seconds == 1.5
+    assert settings.camera.preview_backend == "drm"
+
+
+def test_rejects_unknown_settings(tmp_path: Path) -> None:
+    config = tmp_path / "test.toml"
+    config.write_text("surprise = true", encoding="utf-8")
+
+    with pytest.raises(SettingsError, match="unknown root setting"):
+        load_settings(config)
