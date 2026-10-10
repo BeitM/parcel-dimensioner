@@ -100,6 +100,7 @@ def test_autofocus_once_then_manual_across_session(tmp_path, monkeypatch, fake_c
     # for a continuously held GL preview request. Collection must override both.
     assert fake_camera.configuration["display"] == "main"
     assert fake_camera.configuration["buffer_count"] >= 2
+    assert fake_camera.configuration["main"]["format"] == "XBGR8888"
     assert fake_camera.controls == [{"AfMode": "manual", "LensPosition": 1.25}]
     assert manifest["image_size"] == [640, 480]
     assert manifest["lens_position"] == 1.25

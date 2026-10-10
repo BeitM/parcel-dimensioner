@@ -132,7 +132,10 @@ class Picamera2Backend:
             camera = module.Picamera2(self.camera_index)
             camera.configure(
                 camera.create_still_configuration(
-                    main={"size": (width, height)}, display="main", buffer_count=4
+                    # Native Wayland GL cannot display the still default BGR888.
+                    main={"size": (width, height), "format": "XBGR8888"},
+                    display="main",
+                    buffer_count=4,
                 )
             )
             if self.lens_position is not None:
