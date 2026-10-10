@@ -211,6 +211,9 @@ data/captures/*
 !data/captures/.gitkeep
 config/local.toml
 
+# Temporary review artifacts
+/tmp/
+
 # PyPI configuration file
 .pypirc
 
