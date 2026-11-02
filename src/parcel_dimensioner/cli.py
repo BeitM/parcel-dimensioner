@@ -15,6 +15,7 @@ from parcel_dimensioner.camera.contracts import CameraError
 from parcel_dimensioner.camera.picamera2_backend import Picamera2Backend
 from parcel_dimensioner.camera.service import CameraService
 from parcel_dimensioner.diagnostics import camera_diagnostics
+from parcel_dimensioner.measurement import MeasurementError, save_measurement
 from parcel_dimensioner.settings import (
     PREVIEW_BACKENDS,
     AppSettings,
@@ -58,12 +59,37 @@ def build_parser() -> argparse.ArgumentParser:
     calibration.add_argument("--count", type=_positive_int, default=25)
     calibration.add_argument("--preview-backend", choices=sorted(PREVIEW_BACKENDS))
     _add_capture_overrides(calibration)
+    measure = commands.add_parser(
+        "measure", help="experimental automatic fixed-wall box measurement"
+    )
+    measure.add_argument("--empty", type=Path, required=True, help="matching empty station JPEG")
+    measure.add_argument("--box", type=Path, required=True, help="occupied station JPEG")
+    measure.add_argument("--output-dir", type=Path, required=True, help="new folder for results")
+    measure.add_argument("--square-mm", type=float, default=38.1, help="actual printed square size")
+    measure.add_argument("--marker-mm", type=float, default=28.0, help="actual printed marker size")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.command == "measure":
+            result = save_measurement(
+                args.empty,
+                args.box,
+                args.output_dir,
+                square_mm=args.square_mm,
+                marker_mm=args.marker_mm,
+            )
+            d = result["dimensions_inches"]
+            print(
+                f"Experimental estimate: {d['length']:.2f} x {d['width']:.2f} "
+                f"x {d['height']:.2f} inches (L x W x H)"
+            )
+            for warning in result["warnings"]:
+                print(f"Note: {warning}")
+            print(f"Result and marked image saved in {args.output_dir}")
+            return 0
         settings = load_settings(args.config)
         camera_settings = _camera_settings_with_overrides(settings.camera, args)
         backend = Picamera2Backend(camera_settings.index, camera_settings.lens_position)
@@ -97,7 +123,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 duration_seconds=args.duration,
             )
             return 0
-    except (SettingsError, CameraError) as exc:
+    except (SettingsError, CameraError, MeasurementError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     return 2

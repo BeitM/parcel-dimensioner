@@ -3,24 +3,25 @@
 A Raspberry Pi station for capturing a parcel, estimating its dimensions, reading
 its barcode, and recording its weight.
 
-The repository is currently in **camera bring-up**. The first milestone is a
-repeatable preview and still-image capture from the camera attached to the Pi.
+The repository supports camera preview/capture and **experimental automatic box
+measurement** from a matching empty/occupied image pair. Measurement accuracy is
+still being evaluated; lens calibration and the full scanning workflow remain future work.
 
 ## System shape
 
 The application is intentionally split by capability:
 
 - **Camera** — owns Picamera2 and produces images plus capture metadata.
-- **Measurement** — will turn calibrated image/depth data into length, width,
-  and height.
+- **Measurement** — estimates dimensions of a rectangular box touching both
+  ChArUco walls, using an empty reference image.
 - **Barcode** — will decode the parcel identifier from an image.
 - **Scale** — will read and stabilize the parcel weight.
 - **Workflow** — will coordinate a complete scan and persist the result.
 - **UI** — will present the live view and guide the operator on the attached
   display.
 
-Only the camera capability exists in code today. Planned capabilities are
-documented rather than represented by empty placeholder packages.
+Camera capture and an experimental measurement command exist today. Other planned
+capabilities are documented rather than represented by empty placeholder packages.
 
 See [docs/architecture.md](docs/architecture.md) for the boundaries and staged
 roadmap.
@@ -85,6 +86,31 @@ pytest
 ruff check .
 ```
 
+Install `.[dev,vision]` to include image measurement tests; they are skipped when
+the optional OpenCV/NumPy dependencies are absent.
+
+## Automatic dimension experiment
+
+Install the optional vision dependencies in the same environment as the application:
+
+```bash
+.venv/bin/python -m pip install -e '.[vision]'
+.venv/bin/parcel-dimensioner measure --empty data/captures/repeat-test-02/calibration-001.jpg --box data/captures/repeat-test-02/calibration-002.jpg --output-dir data/captures/measurement-02-002
+```
+
+The command selects all measurement points automatically. It prints estimated
+length, width, and height in inches and saves `result.json`, `measurement.jpg`
+(marked corners), and `change-mask.png` in a **new** output folder. It does not
+overwrite images or old results. It works on a laptop as well as the Pi; it needs
+no running camera or desktop preview.
+
+This first version assumes the project's two known wall patterns, 1.5-inch
+printed squares, a contrasting platform, and a rectangular box flush against
+both walls. It applies no lens correction and can mistake reflections/shadows
+for box edges. Inspect the marked image; a successful calculation does not
+certify accuracy. See [the measurement guide](docs/automatic-measurement.md)
+for the method, assumptions, test results, and troubleshooting.
+
 ## Repository layout
 
 ```text
@@ -92,6 +118,7 @@ config/                         Versioned hardware/application defaults
 docs/                           Architecture and Pi bring-up notes
 src/parcel_dimensioner/
   camera/                       Camera contract and Picamera2 adapter
+  measurement.py                Experimental automatic fixed-wall measurement
   cli.py                        Operator/developer command line
   settings.py                   TOML configuration loading and validation
 tests/                          Hardware-independent tests

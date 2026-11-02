@@ -12,6 +12,10 @@ authors = [{ name = "Parcel Dimensioner contributors" }]
 dependencies = []
 
 [project.optional-dependencies]
+vision = [
+  "numpy>=1.24,<3",
+  "opencv-contrib-python-headless>=4.8,<5",
+]
 dev = [
   "pytest>=8.0,<9",
   "ruff>=0.11,<1",
