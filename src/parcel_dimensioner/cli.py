@@ -67,12 +67,23 @@ def build_parser() -> argparse.ArgumentParser:
     measure.add_argument("--output-dir", type=Path, required=True, help="new folder for results")
     measure.add_argument("--square-mm", type=float, default=38.1, help="actual printed square size")
     measure.add_argument("--marker-mm", type=float, default=28.0, help="actual printed marker size")
+    touchscreen = commands.add_parser("touchscreen", help="open the Pi touchscreen scanner app")
+    touchscreen.add_argument("--windowed", action="store_true", help="open in a regular window")
+    touchscreen.add_argument("--lens-position", type=_nonnegative_float)
+    desktop = commands.add_parser("desktop-install", help="install a Box Scanner desktop shortcut")
+    desktop.add_argument("--lens-position", type=_nonnegative_float)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.command == "desktop-install":
+            from parcel_dimensioner.desktop import install_desktop
+
+            for path in install_desktop(args.config, args.lens_position):
+                print(f"Installed {path}")
+            return 0
         if args.command == "measure":
             result = save_measurement(
                 args.empty,
@@ -92,6 +103,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         settings = load_settings(args.config)
         camera_settings = _camera_settings_with_overrides(settings.camera, args)
+        if args.command == "touchscreen":
+            from parcel_dimensioner.touchscreen import launch_touchscreen
+
+            launch_touchscreen(camera_settings, settings.captures_dir, windowed=args.windowed)
+            return 0
         backend = Picamera2Backend(camera_settings.index, camera_settings.lens_position)
 
         if args.camera_command == "doctor":

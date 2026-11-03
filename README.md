@@ -91,6 +91,10 @@ the optional OpenCV/NumPy dependencies are absent.
 
 ## Automatic dimension experiment
 
+For touch-button capture and on-screen dimensions, see the
+[touchscreen app setup and daily workflow](docs/touchscreen.md). The app can be
+launched from a Box Scanner shortcut on the Pi desktop.
+
 Install the optional vision dependencies in the same environment as the application:
 
 ```bash
