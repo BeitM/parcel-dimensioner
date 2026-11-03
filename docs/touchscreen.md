@@ -4,17 +4,40 @@ The Pi can run a local fullscreen app with a live camera view, large touch
 buttons, and dimensions shown in inches. No browser, network server, or company
 API is needed. The desktop launcher opens this app; it does not start on boot.
 
+## Transfer the changes from the laptop
+
+Commit the touchscreen changes on the laptop first, if they are not already
+committed. Then run this in **Windows PowerShell on the laptop** to upload the
+commit to GitHub and connect to the Pi:
+
+```powershell
+cd C:\Code\parcel-dimensioner
+git push origin main
+ssh box-scanner@192.168.1.228
+```
+
+Enter the Pi login password when SSH prompts for it. Once the prompt is the Pi's
+shell, run the installation block below. If the push fails, resolve that before
+pulling on the Pi. Git transfers committed code; ignored captures stay on their
+current device.
+
 ## One-time setup on the Pi
 
-First transfer the updated code to the Pi. From its project folder:
+Run these in the **Pi shell**, either over SSH or in a Pi desktop terminal:
 
 ```bash
+cd ~/parcel-dimensioner
+git pull --ff-only
 sudo apt update
 sudo apt install -y python3-tk python3-picamera2
-cd ~/parcel-dimensioner
 .venv/bin/python -m pip install -e '.[touchscreen]'
 .venv/bin/parcel-dimensioner desktop-install --lens-position 1.018378
 ```
+
+If the pull fails because of local changes, stop and inspect those changes;
+do not discard them to force the update. After installation, use the Pi desktop
+or Pi Connect screen sharing to launch **Box Scanner**. The remote shell alone
+does not display the app on your laptop.
 
 Use the existing virtual environment created with `--system-site-packages` so
 it can see the Pi's Picamera2 and Tk installation. The installer creates **Box

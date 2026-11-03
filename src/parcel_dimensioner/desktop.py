@@ -26,7 +26,7 @@ def desktop_entry(project: Path, executable: str, config: Path | None, lens_posi
         args += ["--lens-position", str(lens_position)]
     path = str(project).replace("\\", "\\\\").replace("\n", "\\n")
     return (
-        f"{MARKER}\n[Desktop Entry]\nType=Application\nName=Box Scanner\n"
+        f"[Desktop Entry]\n{MARKER}\nType=Application\nName=Box Scanner\n"
         f"Comment=Capture and measure boxes\nExec={' '.join(map(quote, args))}\n"
         f"Path={path}\nIcon=camera-photo\nTerminal=false\nCategories=Utility;\n"
     )
@@ -55,8 +55,12 @@ def install_desktop(config=None, lens_position=None):
         desktop / "parcel-dimensioner.desktop",
     ]
     for target in targets:
-        if target.exists() and not target.read_text(encoding="utf-8").startswith(MARKER):
-            raise CameraError(f"Will not replace an unrelated shortcut: {target}")
+        if target.exists():
+            existing = target.read_text(encoding="utf-8")
+            if not existing.startswith(
+                (MARKER + "\n[Desktop Entry]\n", "[Desktop Entry]\n" + MARKER + "\n")
+            ):
+                raise CameraError(f"Will not replace an unrelated shortcut: {target}")
     text = desktop_entry(project, sys.executable, config, lens_position)
     try:
         for target in targets:

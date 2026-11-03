@@ -111,3 +111,27 @@ def test_desktop_entry_keeps_venv_path_and_focus():
     assert '"/home/pi/my scanner/.venv/bin/python"' in text
     assert '"--config"' in text and '"--lens-position" "1.018378"' in text
     assert "Terminal=false" in text
+    assert text.startswith("[Desktop Entry]\n")
+
+
+def test_desktop_installer_repairs_old_header_and_can_reinstall(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from parcel_dimensioner import desktop
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "pyproject.toml").touch()
+    monkeypatch.setattr(desktop.sys, "platform", "linux")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "share"))
+    monkeypatch.setattr(
+        desktop.subprocess,
+        "run",
+        lambda *a, **k: SimpleNamespace(stdout=str(tmp_path / "Desktop") + "\n"),
+    )
+    old = tmp_path / "Desktop/parcel-dimensioner.desktop"
+    old.parent.mkdir()
+    old.write_text(desktop.MARKER + "\n[Desktop Entry]\nName=Box Scanner\n")
+    targets = desktop.install_desktop(lens_position=1.018378)
+    desktop.install_desktop(lens_position=1.018378)
+    assert all(p.read_text().startswith("[Desktop Entry]\n") for p in targets)
