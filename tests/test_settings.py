@@ -5,6 +5,15 @@ import pytest
 from parcel_dimensioner.settings import AppSettings, SettingsError, load_settings
 
 
+def test_touchscreen_cli_can_override_saved_capture_resolution():
+    from parcel_dimensioner.cli import _camera_settings_with_overrides, build_parser
+    from parcel_dimensioner.settings import CameraSettings
+
+    args = build_parser().parse_args(["touchscreen", "--width", "4608", "--height", "2592"])
+    settings = _camera_settings_with_overrides(CameraSettings(width=1920, height=1080), args)
+    assert (settings.width, settings.height) == (4608, 2592)
+
+
 def test_missing_implicit_config_uses_defaults(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

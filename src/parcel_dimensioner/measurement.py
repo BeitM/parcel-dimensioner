@@ -45,6 +45,17 @@ def _project(points, matrix, cv, np):
     return cv.perspectiveTransform(np.asarray(points, np.float32).reshape(-1, 1, 2), matrix)[:, 0]
 
 
+def _measurement_image(image, cv):
+    """Bound vision memory and preserve the existing detection thresholds."""
+    height, width = image.shape[:2]
+    ratio = min(1.0, 1920 / width, 1080 / height)
+    if ratio < 1:
+        return cv.resize(
+            image, (round(width * ratio), round(height * ratio)), interpolation=cv.INTER_AREA
+        )
+    return image
+
+
 def _largest_marker_group(corners, cv, np):
     """Separate the wall from small spare prints with repeated IDs, without screen ROIs."""
     centers = np.array([c.reshape(4, 2).mean(axis=0) for c in corners])
@@ -252,6 +263,8 @@ def measure_pair(
         raise MeasurementError("Cannot read one of the supplied image files.")
     if empty.shape != box.shape:
         raise MeasurementError("Empty and box images must have the same resolution and crop.")
+    source_box = box
+    empty, box = _measurement_image(empty, cv), _measurement_image(box, cv)
     walls = [_detect_wall(empty, s, square_mm, marker_mm, cv, np) for s in BOARDS]
     shifts, fitted_shifts = [], []
     movement_warnings = []
@@ -409,6 +422,9 @@ def measure_pair(
         "box_image": str(box_path),
         "square_mm": square_mm,
         "marker_mm": marker_mm,
+        "source_image_size": list(source_box.shape[1::-1]),
+        "processing_image_size": list(box.shape[1::-1]),
+        "diagnostic_pixel_space": "processing_image",
         "dimensions_inches": dimensions,
         "height_by_wall_inches": dict(
             zip((s.name for s in BOARDS), (h / 25.4 for h in heights), strict=True)
@@ -435,7 +451,17 @@ def measure_pair(
     }
     from parcel_dimensioner.review import draw_box_review
 
-    annotated = draw_box_review(box, result, cv, np)
+    # Barcode ROI and marked edges must use original capture coordinates.
+    factors = np.array(source_box.shape[1::-1]) / np.array(box.shape[1::-1])
+    result["points_pixels"] = {
+        key: (np.asarray(value) * factors).tolist()
+        for key, value in result["points_pixels"].items()
+    }
+    result["box_contour_pixels"] = (np.asarray(result["box_contour_pixels"]) * factors).tolist()
+    for edge in result["box_edges_pixels"]:
+        for key in ("start", "end"):
+            edge[key] = (np.asarray(edge[key]) * factors).tolist()
+    annotated = draw_box_review(source_box, result, cv, np)
     return result, annotated, mask
 
 

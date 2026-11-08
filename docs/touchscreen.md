@@ -5,6 +5,12 @@ buttons, dimensions in inches, weight in pounds, and automatic barcode/package
 ID reading. No browser, network server, or company
 API is needed. The desktop launcher opens this app; it does not start on boot.
 
+The current camera defaults are 4608 x 2592 for the Camera Module 3 Wide. Barcode
+decoding reads the full saved photo; dimensions use a smaller working copy of
+the same exposure and map the detected outline back to full-size coordinates.
+The live view uses a separate 800 x 450 stream. Existing custom camera TOMLs can
+override this default; see [the full-resolution trial](barcodes.md).
+
 ## Transfer the changes from the laptop
 
 Commit the app and Pico firmware changes on the laptop first, if they are not already
@@ -71,7 +77,11 @@ at startup and locks that position; keep the wall patterns clearly visible.
    Tap **Capture empty station** to act immediately. The app checks both walls and the
    floor edge and zeros the scale. An unavailable scale does not prevent saving
    the image reference; the app explains that weight is unavailable.
-3. To read a distant/angled label, hold it closer and facing the camera, then
+3. For the single-photo trial, place the box against both walls with its label
+   facing the camera and tap **Measure box**, without scanning a separate label.
+   Clear any pending label first. The original full-resolution photo supplies
+   both dimensions and barcode reading; stable weight is recorded with it.
+   To read a distant/angled label in a separate step, hold it closer and facing the camera, then
    tap **Scan label**. Keep the whole barcode in the center and hold still while
    it autofocuses. Check the pending ID (choose among multiple codes if needed).
    The station focus is restored automatically. **Clear label** discards a

@@ -21,8 +21,8 @@ class SettingsError(ValueError):
 @dataclass(frozen=True, slots=True)
 class CameraSettings:
     index: int = 0
-    width: int = 1920
-    height: int = 1080
+    width: int = 4608
+    height: int = 2592
     warmup_seconds: float = 2.0
     preview_backend: str = "auto"
     lens_position: float | None = None

@@ -355,6 +355,38 @@ def test_camera_focus_mismatch_rejected_and_close_releases_owner(tmp_path):
     assert device.closed and c.camera is None
 
 
+def test_camera_full_resolution_configuration_uses_small_preview_stream(monkeypatch):
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from parcel_dimensioner import station
+
+    configured = []
+    streams = []
+    device = SimpleNamespace(
+        options={},
+        create_still_configuration=lambda **kwargs: kwargs,
+        configure=lambda config: configured.append(config),
+        start=lambda: None,
+        capture_array=lambda stream: streams.append(stream) or np.full((675, 800), 128, np.uint8),
+        camera_configuration=lambda: {"lores": {"size": (800, 450)}},
+    )
+    monkeypatch.setattr(
+        station, "_load_picamera2", lambda: SimpleNamespace(Picamera2=lambda _: device)
+    )
+    monkeypatch.setattr(station, "_set_manual_focus", lambda *args: None)
+    monkeypatch.setattr(station.time, "sleep", lambda _: None)
+    camera = StationCamera(CameraSettings(lens_position=1.0))
+    camera.start()
+    assert configured[0]["main"]["size"] == (4608, 2592)
+    assert configured[0]["lores"] == {"size": (800, 450), "format": "YUV420"}
+    assert configured[0]["raw"] is None and configured[0]["buffer_count"] == 2
+    assert device.options["quality"] == 95
+    assert camera.preview().size == (800, 450)
+    assert streams == ["lores"]
+
+
 def test_desktop_entry_keeps_venv_path_and_focus():
     from parcel_dimensioner.desktop import desktop_entry
 

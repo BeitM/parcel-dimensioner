@@ -45,6 +45,19 @@ def test_rotated_and_inverted_code(tmp_path):
     assert initial_identity(result)["package_id"] == "ROTATED-42"
 
 
+def test_barcode_decoder_keeps_full_resolution_image_and_native_positions(tmp_path):
+    image = pytest.importorskip("PIL.Image")
+    canvas = image.new("RGB", (4608, 2592), "white")
+    canvas.paste(label("FULL-RES-42"), (3000, 1800))
+    path = tmp_path / "box.jpg"
+    canvas.save(path, quality=95)
+    result = decode_image(path, outline=[[2800, 1600], [4200, 1600], [4200, 2400], [2800, 2400]])
+    assert result["image_size"] == [4608, 2592]
+    assert initial_identity(result)["package_id"] == "FULL-RES-42"
+    points = result["candidates"][0]["positions"][0]["points"]
+    assert min(p[0] for p in points) > 2800
+
+
 def test_multiple_codes_deduplicate_values_and_exclude_background(tmp_path):
     image = pytest.importorskip("PIL.Image")
     canvas = image.new("RGB", (1920, 1080), "white")

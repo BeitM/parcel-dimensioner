@@ -5,8 +5,9 @@ captures_dir = "data/captures"
 
 [camera]
 index = 0
-width = 1920
-height = 1080
+# Full sensor resolution for the station's Camera Module 3 Wide.
+width = 4608
+height = 2592
 warmup_seconds = 2.0
 preview_backend = "auto"
 

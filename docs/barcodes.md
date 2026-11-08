@@ -1,10 +1,20 @@
 # Barcode reading and package IDs
 
-The touchscreen supports a two-step workflow: **Scan label** close to the camera,
-then **Measure box** in the station corner. The default resolution stays at
-1920 x 1080. Label capture briefly autofocuses and restores the station's locked
-lens position before returning. Measurement and empty captures keep locked focus.
-There is one camera owner and no indefinite live decoding loop.
+The default trial uses one **4608 x 2592** photograph for dimensions and barcode
+reading, the full resolution of the station's Camera Module 3 Wide. Put the box
+against both walls with the label facing the camera and tap **Measure box**.
+Do not scan a separate label first; **Clear label** discards a pending close-up ID.
+
+The two-step **Scan label**, then **Measure box** workflow remains optional.
+Label capture briefly autofocuses and restores the station's locked lens position
+before returning. Measurement and empty captures keep locked focus. There is
+one camera owner and no indefinite live decoding loop.
+
+The live preview uses a small 800 x 450 stream. Dimension detection works on a
+copy bounded by 1920 x 1080 to keep the existing thresholds and memory costs;
+its detected outline/points are mapped back to original image coordinates.
+Barcode decoding uses the full saved image. Marked results retain the original
+image size before the ID panel is appended. JPEG quality is set to 95.
 
 ## Update the Pi
 
@@ -19,6 +29,25 @@ git pull --ff-only
 
 Open the existing Box Scanner desktop icon. The Pico program and desktop
 shortcut do not need reinstalling for this change.
+
+The built-in and repository camera defaults are now 4608 x 2592. If the launcher
+uses a custom `--config`, update that file's `[camera]` width/height too. Capture
+a fresh empty station after switching resolution. To force a one-session trial
+from a **Pi desktop terminal**, close the app first and run:
+
+```bash
+.venv/bin/parcel-dimensioner touchscreen --width 4608 --height 2592 --lens-position 1.018378
+```
+
+Use `--width 1920 --height 1080` for a lower-resolution comparison. Command-line
+overrides apply to that launch only. SSH is suitable for installing changes;
+launching a visible app requires the Pi desktop session.
+
+Higher resolution provides 2.4 times the pixels across a label at the same field
+of view, but increases capture/decoding time, memory, storage, and transfer sizes.
+The small preview reduces software overhead; it does not restore the sensor's
+lower-resolution frame rate. It cannot recover hidden bars, glare, or optical
+blur. Real label success and Pi latency still need station testing.
 
 The touchscreen extra now includes `zxing-cpp`. The optional `[barcode]` extra
 installs only the barcode-image dependencies for offline/laptop use. Imports
@@ -112,6 +141,10 @@ The scan's top-level `result.json` adds:
 - `barcode.selected_index`: selected candidate, or null for manual/no selection.
 - `barcode_capture`: image source (`box.jpg` or separate `label.jpg`), mode,
   and the original label capture ID for a two-step scan.
+- `source_image_size`, `processing_image_size`, `diagnostic_pixel_space`:
+  capture and dimension-working sizes. Box points, edges, and barcode polygons
+  use source pixels; fit/shift diagnostics, reference alignment, and the saved
+  change mask use processing pixels.
 
 Each close-up attempt has a `label-<id>/` directory with its image, metadata,
 and ID record. An accepted two-step measurement also includes copies of

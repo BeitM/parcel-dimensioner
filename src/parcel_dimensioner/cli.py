@@ -72,6 +72,8 @@ def build_parser() -> argparse.ArgumentParser:
     touchscreen = commands.add_parser("touchscreen", help="open the Pi touchscreen scanner app")
     touchscreen.add_argument("--windowed", action="store_true", help="open in a regular window")
     touchscreen.add_argument("--lens-position", type=_nonnegative_float)
+    touchscreen.add_argument("--width", type=_positive_int)
+    touchscreen.add_argument("--height", type=_positive_int)
     desktop = commands.add_parser("desktop-install", help="install a Box Scanner desktop shortcut")
     desktop.add_argument("--lens-position", type=_nonnegative_float)
     return parser

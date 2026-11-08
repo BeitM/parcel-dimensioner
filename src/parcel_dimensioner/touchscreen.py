@@ -168,7 +168,9 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
     package_frame.pack(fill="x", padx=15, pady=3)
     package_frame.columnconfigure(0, weight=1)
     package_value = tk.StringVar(value="Package ID: —")
-    package_status = tk.StringVar(value="Hold label close, tap Scan label, then measure.")
+    package_status = tk.StringVar(
+        value="Measure box reads its barcode too. Scan label is optional."
+    )
     package_label = tk.Label(
         package_frame,
         textvariable=package_value,
@@ -255,7 +257,7 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
         elif result:
             message = "Barcode unavailable • enter an ID"
         else:
-            message = "Hold label close, tap Scan label, then measure."
+            message = "Measure box reads its barcode too. Scan label is optional."
         if state["pending_label"]:
             message = "Next box • " + message
         package_status.set(message)

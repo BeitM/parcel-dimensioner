@@ -110,6 +110,27 @@ def test_no_box_is_rejected(tmp_path):
         measure_pair(empty, empty)
 
 
+def test_full_resolution_measurement_preserves_native_barcode_coordinates(tmp_path):
+    empty, box = render_station(tmp_path)
+    baseline, _, _ = measure_pair(empty, box)
+    for path in (empty, box):
+        enlarged = cv.resize(cv.imread(str(path)), (4608, 2592), interpolation=cv.INTER_LINEAR)
+        cv.imwrite(str(path), enlarged)
+    result, annotated, mask = measure_pair(empty, box)
+    assert result["source_image_size"] == [4608, 2592]
+    assert result["processing_image_size"] == [1920, 1080]
+    assert annotated.shape[:2] == (2592, 4608)
+    assert mask.shape == (1080, 1920)
+    for key, value in baseline["dimensions_inches"].items():
+        assert result["dimensions_inches"][key] == pytest.approx(value, abs=0.1)
+    np.testing.assert_allclose(
+        result["points_pixels"]["floor"], np.array(baseline["points_pixels"]["floor"]) * 2.4, atol=3
+    )
+    assert max(p[0] for p in result["box_contour_pixels"]) > 1920
+    for edge in result["box_edges_pixels"]:
+        assert len(edge["start"]) == len(edge["end"]) == 2
+
+
 def test_moved_station_is_rejected(tmp_path):
     empty, box = render_station(tmp_path)
     image = cv.imread(str(box))

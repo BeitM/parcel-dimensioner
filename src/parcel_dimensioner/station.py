@@ -29,6 +29,7 @@ from parcel_dimensioner.measurement import (
     MeasurementError,
     _detect_wall,
     _floor_line,
+    _measurement_image,
     _vision,
 )
 from parcel_dimensioner.review import save_scan_review
@@ -48,10 +49,13 @@ class StationCamera:
         self.camera.configure(
             self.camera.create_still_configuration(
                 main={"size": (self.settings.width, self.settings.height), "format": "BGR888"},
-                buffer_count=4,
+                lores={"size": (800, 450), "format": "YUV420"},
+                raw=None,
+                buffer_count=2,
                 queue=False,
             )
         )
+        self.camera.options["quality"] = 95
         if self.position is not None:
             _set_manual_focus(self.camera, self.position)
         self.camera.start()
@@ -66,9 +70,15 @@ class StationCamera:
         time.sleep(0.5)
 
     def preview(self):
-        image = self.camera.capture_image("main")
-        image.thumbnail((800, 450))
-        return image
+        from PIL import Image
+
+        cv, _ = _vision()
+        # Convert only the small stream. YUV includes stride padding; crop RGB
+        # after conversion, as required by Picamera2's planar array layout.
+        frame = self.camera.capture_array("lores")
+        width, height = self.camera.camera_configuration()["lores"]["size"]
+        rgb = cv.cvtColor(frame, cv.COLOR_YUV2RGB_I420)[:height, :width]
+        return Image.fromarray(rgb)
 
     def capture(self, path):
         metadata = _plain_metadata(self.camera.capture_file(str(path)) or {})
@@ -113,6 +123,7 @@ def validate_reference(path):
     image = cv.imread(str(path))
     if image is None:
         raise MeasurementError("Cannot read the empty image.")
+    image = _measurement_image(image, cv)
     for spec in BOARDS:
         wall = _detect_wall(image, spec, 38.1, 28.0, cv, np)
         _floor_line(image, wall, 38.1, cv, np)
