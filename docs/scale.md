@@ -58,7 +58,8 @@ cd ~/parcel-dimensioner
 1. Leave the platform and attached walls installed; remove packages and hands.
 2. Tap **Capture empty station**. This captures the camera reference and zeros
    the scale. **Zero scale** can subsequently zero an empty platform without
-   replacing the image reference. Confirmations cannot prove the platform is empty.
+   replacing the image reference. Both buttons act immediately, without a
+   confirmation popup; clear the platform before tapping either button.
 3. Place one box against both walls, take hands off, and tap **Measure box**.
 4. The app waits up to 10 seconds for a stable weight, then captures the box and
    verifies a fresh reading after capture. Motion, sensor errors, stale data,

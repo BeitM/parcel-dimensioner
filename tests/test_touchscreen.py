@@ -33,7 +33,6 @@ def test_buttons_result_and_error_clear_stale_dimensions(tmp_path, monkeypatch, 
         return
     tk = pytest.importorskip("tkinter")
     image_module = pytest.importorskip("PIL.Image")
-    from tkinter import messagebox
 
     from parcel_dimensioner import touchscreen
     from parcel_dimensioner.settings import CameraSettings
@@ -45,7 +44,6 @@ def test_buttons_result_and_error_clear_stale_dimensions(tmp_path, monkeypatch, 
     root.withdraw()
     monkeypatch.setattr(tk, "Tk", lambda: root)
     monkeypatch.setattr(touchscreen, "_vision", lambda: None)
-    monkeypatch.setattr(messagebox, "askokcancel", lambda *a, **kw: True)
     marked = tmp_path / "marked.jpg"
     image_module.new("RGB", (640, 360), "gray").save(marked)
 
@@ -154,7 +152,6 @@ def test_layout_fallback_and_saved_weight_separate_from_live(
         return
     tk = pytest.importorskip("tkinter")
     image_module = pytest.importorskip("PIL.Image")
-    from tkinter import messagebox
 
     from parcel_dimensioner import touchscreen
     from parcel_dimensioner.settings import CameraSettings
@@ -171,7 +168,6 @@ def test_layout_fallback_and_saved_weight_separate_from_live(
     monkeypatch.setattr(root, "winfo_screenheight", lambda: height)
     monkeypatch.setattr(tk, "Tk", lambda: root)
     monkeypatch.setattr(touchscreen, "_vision", lambda: None)
-    monkeypatch.setattr(messagebox, "askokcancel", lambda *a, **kw: True)
     preview_image = image_module.new("RGB", (800, 450), "#25485d")
     marked = tmp_path / "marked.jpg"
     preview_image.save(marked)

@@ -67,7 +67,7 @@ at startup and locks that position; keep the wall patterns clearly visible.
 
 1. Close any other camera preview/capture apps, then open **Box Scanner**.
 2. Clear the platform, keeping the wooden deck and attached walls installed.
-   Tap **Capture empty station**, then confirm. The app checks both walls and the
+   Tap **Capture empty station** to act immediately. The app checks both walls and the
    floor edge and zeros the scale. An unavailable scale does not prevent saving
    the image reference; the app explains that weight is unavailable.
 3. Place a box snugly against both walls and take your hands off. Tap **Measure
@@ -119,7 +119,7 @@ scan is explicitly triggered by a tap. Review results before using them elsewher
 This app automates the existing **experimental** measurement method; it does not
 improve dimension accuracy or add lens calibration, barcode, or webhook
 delivery. It uses the current project's wall layouts and nominal 1.5-inch square
-spacing. The empty station must actually be empty; the confirmation and wall
+spacing. The empty station must actually be empty; the wall
 checks cannot prove that all objects have been removed.
 
 Weight uses the station's initial 5 lb / 10 lb calibration. The known corner

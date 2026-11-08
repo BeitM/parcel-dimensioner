@@ -79,7 +79,6 @@ class StationWorker(threading.Thread):
 def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, windowed=False):
     try:
         import tkinter as tk
-        from tkinter import messagebox
 
         from PIL import Image, ImageTk
     except ImportError as exc:
@@ -188,10 +187,6 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
     def submit(action):
         if state["busy"] or not state["ready"] or state["closing"]:
             return
-        if action in ("empty", "zero"):
-            prompt = "Remove every box. Leave the platform and walls installed, then tap OK."
-            if not messagebox.askokcancel("Empty platform", prompt, parent=root):
-                return
         if action == "empty":
             state["empty"] = False
         reason = state["fallback"] if action == "dimensions_only" else None
