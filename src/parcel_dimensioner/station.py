@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from parcel_dimensioner.barcodes import (
     PackageIdError,
+    barcode_result,
     decode_image,
     initial_identity,
     with_identity,
@@ -24,6 +25,8 @@ from parcel_dimensioner.camera.picamera2_backend import (
     _plain_metadata,
     _set_manual_focus,
 )
+from parcel_dimensioner.label_capture import LabelRestoreError, capture_labels
+from parcel_dimensioner.label_reader import target_bounds
 from parcel_dimensioner.measurement import (
     BOARDS,
     MeasurementError,
@@ -43,6 +46,7 @@ class StationCamera:
         self.settings = settings
         self.camera = None
         self.position = settings.lens_position
+        self.restore_failed = False
 
     def start(self):
         self.camera = _load_picamera2().Picamera2(self.settings.index)
@@ -72,6 +76,7 @@ class StationCamera:
     def preview(self):
         from PIL import Image
 
+        self._check_restored()
         cv, _ = _vision()
         # Convert only the small stream. YUV includes stride padding; crop RGB
         # after conversion, as required by Picamera2's planar array layout.
@@ -81,6 +86,7 @@ class StationCamera:
         return Image.fromarray(rgb)
 
     def capture(self, path):
+        self._check_restored()
         metadata = _plain_metadata(self.camera.capture_file(str(path)) or {})
         reported = metadata.get("LensPosition")
         if not isinstance(reported, (int, float)) or not math.isclose(
@@ -89,28 +95,19 @@ class StationCamera:
             raise CameraError("Focus changed. Reopen the app and capture the empty station again.")
         return metadata
 
-    def capture_label(self, path):
-        """Focus on a close label, then restore the station optics even on failure."""
+    def capture_labels(self, directory, target, *, cancel=None, progress=None):
+        self._check_restored()
         try:
-            if not self.camera.autofocus_cycle():
-                raise CameraError(
-                    "Label focus failed. Hold the label still, a little farther away."
-                )
-            return _plain_metadata(self.camera.capture_file(str(path)) or {})
-        finally:
-            _set_manual_focus(self.camera, self.position)
-            # Drain requests until the restored lens position is reported in three frames.
-            settled = 0
-            for _ in range(30):
-                reported = self.camera.capture_metadata().get("LensPosition")
-                matches = isinstance(reported, (int, float)) and math.isclose(
-                    reported, self.position, abs_tol=0.05
-                )
-                settled = settled + 1 if matches else 0
-                if settled >= 3:
-                    break
-            else:
-                raise CameraError("Station focus could not be restored. Reopen the app.")
+            return capture_labels(
+                self.camera, self.position, directory, target, cancel=cancel, progress=progress
+            )
+        except LabelRestoreError:
+            self.restore_failed = True
+            raise
+
+    def _check_restored(self):
+        if self.restore_failed:
+            raise CameraError("Station camera settings could not be restored. Reopen the app.")
 
     def close(self):
         if self.camera is not None:
@@ -166,15 +163,18 @@ class ScanSession:
         self.review_warning = ""
         self.pending_label = None
 
-    def _capture(self, path, *, label=False):
-        metadata = self.camera.capture_label(path) if label else self.camera.capture(path)
+    def _capture(self, path):
+        metadata = self.camera.capture(path)
+        self._capture_record(path, metadata)
+        return metadata
+
+    def _capture_record(self, path, metadata, captured_at=None):
         record = {
-            "captured_at": datetime.now(UTC).isoformat(),
+            "captured_at": captured_at or datetime.now(UTC).isoformat(),
             "camera_settings": asdict(self.settings),
             "metadata": metadata,
         }
         path.with_suffix(".json").write_text(json.dumps(record, indent=2), encoding="utf-8")
-        return metadata
 
     def capture_empty(self):
         self.last_scan = None
@@ -189,27 +189,69 @@ class ScanSession:
     def clear_label(self):
         self.pending_label = None
 
-    def scan_label(self):
+    def scan_label(self, target=(0.5, 0.5), *, progress=None):
         self.last_scan = None
         self.clear_label()
         folder = self.directory / f"label-{uuid4().hex}"
         folder.mkdir(exist_ok=False)
         path = folder / "label.jpg"
         try:
-            self._capture(path, label=True)
-            # A close-up has no station silhouette. Limit decoding to the guide area.
+            report = self.camera.capture_labels(
+                folder, target, cancel=self.cancel, progress=progress
+            )
             from PIL import Image
 
-            with Image.open(path) as image:
+            with Image.open(folder / report["frames"][0]["image"]) as image:
                 width, height = image.size
+            left, top, right, bottom = target_bounds(target)
             outline = [
-                [width * x, height * y] for x, y in ((0.1, 0.1), (0.9, 0.1), (0.9, 0.9), (0.1, 0.9))
+                [width * x, height * y]
+                for x, y in ((left, top), (right, top), (right, bottom), (left, bottom))
             ]
-            barcode = self.decoder(path, outline=outline)
-            barcode = {**barcode, "region": "label_guide"}
+            candidates = {}
+            primary = report["frames"][0]["image"]
+            failures = []
+            for index, frame in enumerate(report["frames"], 1):
+                if self.cancel is not None and self.cancel.is_set():
+                    raise CameraError("Label scan cancelled.")
+                name = frame["image"]
+                self._capture_record(folder / name, frame["metadata"], frame.get("captured_at"))
+                if progress:
+                    progress(f"Reading label picture {index}/{len(report['frames'])}…")
+                decoded = self.decoder(folder / name, outline=outline, enhance=True)
+                frame["barcode"] = decoded
+                if decoded["status"] == "unavailable":
+                    failures.append(decoded.get("reason"))
+                if decoded["candidates"] and not candidates:
+                    primary = name
+                for candidate in decoded["candidates"]:
+                    saved = candidates.setdefault(
+                        candidate["value"],
+                        {
+                            **candidate,
+                            "formats": [],
+                            "positions": [],
+                            "raw_bytes_base64": [],
+                        },
+                    )
+                    for key in ("formats", "raw_bytes_base64"):
+                        for value in candidate.get(key, []):
+                            if value not in saved[key]:
+                                saved[key].append(value)
+                    for location in candidate.get("positions", []):
+                        saved["positions"].append({**location, "image": name})
+            barcode = barcode_result(
+                list(candidates.values()), image_size=[width, height], region="label_target"
+            )
+            if failures and len(failures) == len(report["frames"]):
+                barcode.update(status="unavailable", reason=failures[0])
+            report["primary_image"] = primary
+            shutil.copyfile(folder / primary, path)
+            shutil.copyfile((folder / primary).with_suffix(".json"), path.with_suffix(".json"))
             result = {
                 "scan_id": folder.name,
                 "barcode": barcode,
+                "label_capture": report,
                 **initial_identity(barcode),
             }
             self._save_result(folder, result)
@@ -268,12 +310,27 @@ class ScanSession:
                     key: label_result[key]
                     for key in ("package_id", "package_id_source", "package_id_history")
                 }
-                for name in ("label.jpg", "label.json"):
+                capture = label_result.get("label_capture", {})
+                for frame in capture.get("frames", []):
+                    name = frame["image"]
                     shutil.copyfile(label_folder / name, folder / name)
+                    shutil.copyfile(
+                        (label_folder / name).with_suffix(".json"),
+                        (folder / name).with_suffix(".json"),
+                    )
+                source = capture.get("primary_image", "label.jpg")
+                selected = barcode.get("selected_index")
+                if selected is not None:
+                    locations = barcode["candidates"][selected].get("positions", [])
+                    if locations:
+                        source = locations[0].get("image", source)
+                shutil.copyfile(label_folder / source, folder / "label.jpg")
+                shutil.copyfile((label_folder / source).with_suffix(".json"), folder / "label.json")
                 barcode_capture = {
                     "mode": "separate_label",
                     "image": "label.jpg",
                     "label_id": label_result["scan_id"],
+                    "source_frame": source,
                 }
             result = {
                 **result,
@@ -282,6 +339,7 @@ class ScanSession:
                 "scan_mode": "dimensions_and_weight" if ticket else "dimensions_only",
                 "barcode": barcode,
                 "barcode_capture": barcode_capture,
+                **({"label_capture": capture} if pending is not None else {}),
                 **identity,
             }
             self._save_result(folder, result)
@@ -316,6 +374,16 @@ class ScanSession:
             raise PackageIdError("This scan is no longer current. Measure the box again.")
         folder, original = self.last_scan
         result = with_identity(original, value, candidate_index)
+        if (
+            candidate_index is not None
+            and result.get("barcode_capture", {}).get("mode") == "separate_label"
+        ):
+            locations = result["barcode"]["candidates"][candidate_index].get("positions", [])
+            if locations and locations[0].get("image"):
+                result["barcode_capture"] = {
+                    **result["barcode_capture"],
+                    "source_frame": locations[0]["image"],
+                }
         self._save_result(folder, result)
         self.last_scan = folder, result
         self._update_review(folder, result)
@@ -324,6 +392,11 @@ class ScanSession:
     def _update_review(self, folder, result):
         self.review_warning = ""
         try:
+            capture = result.get("barcode_capture", {})
+            source = capture.get("source_frame")
+            if capture.get("mode") == "separate_label" and source and source != "label.jpg":
+                shutil.copyfile(folder / source, folder / "label.jpg")
+                shutil.copyfile((folder / source).with_suffix(".json"), folder / "label.json")
             self.review_path = self.reviewer(folder, result)
             with suppress(OSError):
                 (folder / "review" / "overlay-error.txt").unlink(missing_ok=True)

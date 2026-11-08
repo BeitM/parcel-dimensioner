@@ -8,6 +8,7 @@ from contextlib import suppress
 from pathlib import Path
 
 from parcel_dimensioner.camera.contracts import CameraError
+from parcel_dimensioner.label_reader import preview_point, target_bounds
 from parcel_dimensioner.measurement import _vision
 from parcel_dimensioner.package_id_editor import display_text, open_package_id_editor
 from parcel_dimensioner.scale import ScaleError, SerialScale
@@ -57,7 +58,11 @@ class StationWorker(threading.Thread):
                             self.scale.zero(self.stopping)
                             self.events.put(("zero", "Scale zeroed. Place a box to measure."))
                         elif command == "label":
-                            self.events.put(("label", session.scan_label()))
+                            result = session.scan_label(
+                                **(reason or {}),
+                                progress=lambda note: self.events.put(("label_progress", note)),
+                            )
+                            self.events.put(("label", result))
                         elif command == "clear_label":
                             session.clear_label()
                             self.events.put(("label", None))
@@ -134,6 +139,10 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
         "result": None,
         "editing": False,
         "pending_label": None,
+        "label_target": (0.5, 0.5),
+        "target_selected": False,
+        "preview_bounds": None,
+        "live_frame": None,
     }
     portrait = root.winfo_screenheight() > root.winfo_screenwidth()
     font = 16 if portrait else 14
@@ -169,7 +178,7 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
     package_frame.columnconfigure(0, weight=1)
     package_value = tk.StringVar(value="Package ID: —")
     package_status = tk.StringVar(
-        value="Measure box reads its barcode too. Scan label is optional."
+        value="For labels: tap the barcode in live view, then Scan label."
     )
     package_label = tk.Label(
         package_frame,
@@ -257,7 +266,7 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
         elif result:
             message = "Barcode unavailable • enter an ID"
         else:
-            message = "Measure box reads its barcode too. Scan label is optional."
+            message = "For labels: tap the barcode in live view, then Scan label."
         if state["pending_label"]:
             message = "Next box • " + message
         package_status.set(message)
@@ -305,12 +314,28 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
                 "zero": "Keep hands off — zeroing scale…",
                 "scan": "Waiting for stable weight, then capturing…",
                 "dimensions_only": "Capturing dimensions only — weight will be unavailable.",
-                "label": "Hold label still in the center — focusing and reading barcode…",
+                "label": "Rest the box, label facing camera — taking several label pictures…",
                 "clear_label": "Clearing pending label…",
             }[action]
         )
         enable_buttons()
-        worker.commands.put_nowait(("scan", reason) if action == "dimensions_only" else action)
+        command = ("scan", reason) if action == "dimensions_only" else action
+        if action == "label":
+            command = ("label", {"target": state["label_target"]})
+        worker.commands.put_nowait(command)
+
+    def select_label(event):
+        if state["busy"] or state["closing"] or state["editing"] or state["show_review"]:
+            return
+        bounds = state["preview_bounds"]
+        point = preview_point(event.x, event.y, bounds) if bounds else None
+        if point is not None:
+            state.update(label_target=point, target_selected=True)
+            status.set(
+                "Label target set. Rest the box, face label toward camera, then tap Scan label."
+            )
+
+    preview.bind("<Button-1>", select_label)
 
     def toggle_review():
         state["show_review"] = not state["show_review"]
@@ -496,6 +521,9 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
                         if warning
                         else note + " Replace the box and tap Measure box."
                     )
+                elif event == "label_progress":
+                    if state["busy"]:
+                        status.set(payload)
                 elif event == "label":
                     state.update(busy=False, pending_label=payload)
                     update_package()
@@ -506,7 +534,8 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
                         )
                     elif payload:
                         status.set(
-                            "Choose or enter an ID, rescan the label, or tap Clear label to skip."
+                            "Choose or enter an ID. For a retry, rest the box, avoid glare, "
+                            "tap the barcode, and Scan label again."
                         )
                     else:
                         status.set(
@@ -562,12 +591,36 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
             frame = worker.frames.get_nowait()
         except queue.Empty:
             frame = None
-        image = state["review"] if state["show_review"] else frame
+        if frame is not None:
+            state["live_frame"] = frame
+        image = state["review"] if state["show_review"] else state["live_frame"]
         if image is not None:
             image = image.copy()
             image.thumbnail(
                 (max(10, preview_frame.winfo_width()), max(10, preview_frame.winfo_height()))
             )
+            if not state["show_review"]:
+                state["preview_bounds"] = (
+                    (preview.winfo_width() - image.width) / 2,
+                    (preview.winfo_height() - image.height) / 2,
+                    image.width,
+                    image.height,
+                )
+                if state["target_selected"]:
+                    from PIL import ImageDraw
+
+                    left, top, right, bottom = target_bounds(
+                        state["label_target"], width=0.12, height=0.16
+                    )
+                    rectangle = (
+                        left * image.width,
+                        top * image.height,
+                        right * image.width,
+                        bottom * image.height,
+                    )
+                    pen = ImageDraw.Draw(image)
+                    pen.rectangle(rectangle, outline="black", width=5)
+                    pen.rectangle(rectangle, outline="#41ffe0", width=2)
             state["photo"] = ImageTk.PhotoImage(image)
             preview.configure(image=state["photo"])
         root.after(100, poll)

@@ -1,14 +1,18 @@
 # Barcode reading and package IDs
 
-The default trial uses one **4608 x 2592** photograph for dimensions and barcode
-reading, the full resolution of the station's Camera Module 3 Wide. Put the box
-against both walls with the label facing the camera and tap **Measure box**.
-Do not scan a separate label first; **Clear label** discards a pending close-up ID.
+For this corner station, the recommended flow is **Scan label**, then **Measure
+box**. Rest the box away from the corner, turn its label toward the camera, tap
+the barcode in the live view, and scan. The focus box marks the selected area;
+it is not necessary to fit the whole barcode inside that small focus box.
+Then move the same box snugly into the corner to measure dimensions and weight.
 
-The two-step **Scan label**, then **Measure box** workflow remains optional.
-Label capture briefly autofocuses and restores the station's locked lens position
-before returning. Measurement and empty captures keep locked focus. There is
-one camera owner and no indefinite live decoding loop.
+Label scanning takes three **4608 x 2592** photographs with targeted autofocus
+and bracketed short exposures. It restores automatic exposure, normal autofocus
+metering, and the station's locked lens position before returning. The camera
+crop and sensor configuration are unchanged. Measurement and empty captures
+keep locked focus. There is one camera owner and no indefinite decoding loop.
+**Measure box** still tries barcode decoding from its one measurement photo
+when no label is pending; **Clear label** discards a pending label ID.
 
 The live preview uses a small 800 x 450 stream. Dimension detection works on a
 copy bounded by 1920 x 1080 to keep the existing thresholds and memory costs;
@@ -57,9 +61,14 @@ The decoder uses [ZXing-C++'s Python image-reading API](https://github.com/zxing
 ## On-screen workflow
 
 1. Capture the empty station normally, with the platform empty.
-2. Hold the label closer to the camera, facing it as squarely as possible. Keep
-   the complete barcode, including the blank space at each end, inside the
-   central 80% of the preview. Tap **Scan label** and hold still during focusing.
+2. Rest the box on the platform away from the corner, facing its label toward
+   the camera as squarely as possible. It need not be held close to the lens.
+   Tap the barcode's middle in **Live view** to aim the small focus box, then
+   tap **Scan label**. The selected target is remembered until another tap or
+   app restart; without a tap, the image center is used. Taps in letterbox
+   padding or on a marked result do not change the target.
+   Keep the complete barcode and blank spaces at its ends visible. Keep the
+   box still until the app finishes focusing, taking three pictures, and reading.
    Check the pending ID. Multiple values require **Choose ID**; a missing code
    can be rescanned or entered with **Enter ID**. **Clear label** discards the
    pending label and allows measurement without one.
@@ -68,7 +77,7 @@ The decoder uses [ZXing-C++'s Python image-reading API](https://github.com/zxing
    ID. A successful measurement consumes the pending label; scan a new label
    for the next package. A failed measurement keeps it for a retry. The software
    cannot verify that the operator placed the same physical package.
-4. Scanning a close label is optional. Without one, **Measure box** still tries
+4. Scanning a separate label is optional. Without one, **Measure box** still tries
    barcode decoding from the original station image, as before.
 5. Inspect the **Package ID** row beneath the measurement cards:
    - **Barcode found:** one unique usable value was decoded and filled in.
@@ -107,15 +116,23 @@ extraction are still planned. There is no Share button in this implementation.
 ## Decoding behavior and limits
 
 - The worker tries RGB, contrast-normalized grayscale, and explicitly inverted
-  grayscale, with decoder rotation/downscale support. There are three bounded
-  passes rather than an indefinite scan loop. The UI stays on its own thread.
+  grayscale for normal measurement-image decoding, with decoder rotation/downscale
+  support. The label step uses a native-pixel crop around the selected target,
+  contrast/sharpening passes, bounded upsampling for small crops, and up to three
+  OpenCV-detected straightened barcode regions. These label views disable the
+  decoder's downsampling and map all decoded corners back to source pixels.
+  Each picture has at most eleven views; there are three pictures per attempt.
+  The UI stays on its own thread and displays capture/decoding progress.
 - Candidates whose centers lie outside the measurement algorithm's selected
-  package contour are excluded for station-image decoding. Close-up label
-  decoding uses the central 80% of its own image instead. This helps avoid labels on background boxes.
+  package contour are excluded for station-image decoding. The label step uses
+  a larger search region around the selected focus point, with padded crops
+  to retain quiet zones. This helps avoid labels on background boxes.
   That contour remains experimental, especially with shadows/poor contrast.
 - Duplicate decoded text is combined into one candidate, preserving formats,
-  positions in the original image, and raw byte encodings. Multiple distinct
-  values always need a choice; no company/carrier preference rules are guessed.
+  positions in the original image, source-frame names, and raw byte encodings.
+  Codes read in different burst frames are combined; multiple distinct values
+  always require a choice, even if each individual frame showed only one code.
+  No company/carrier preference rules are guessed.
 - A single decoded value is not proof it is the shipment ID. A product UPC may
   be shared by many identical boxes; a carrier barcode can contain additional
   data. Review the value, and use manual entry when necessary.
@@ -126,6 +143,18 @@ extraction are still planned. There is no Share button in this implementation.
 - No generic confidence percentage is invented. Only decoder-valid results
   are kept; visibility/sharpness, angle, glare, label size, and barcode format
   still affect success. The installed ChArUco wall patterns are not parcel IDs.
+
+The label shutters target 10 ms, 6 ms, and 16 ms (subject to camera control
+limits), with gain/brightness bracketed from the initial automatic exposure.
+This reduces the risk of motion blur compared with the 50 ms images from the
+uploaded trial, but can increase noise or produce darker pictures. It cannot
+remove strong reflections or recover unresolved bars. All burst frames are
+examined; the first one yielding a valid read supplies the default review image.
+The four old label attempts were retried with enhanced processing and remained
+unreadable. Fresh station captures are needed to verify physical range and speed.
+The focus-window and exposure controls follow the
+[Picamera2 manual](https://datasheets.raspberrypi.com/camera/picamera2-manual.pdf),
+and tilted-region detection uses [OpenCV BarcodeDetector](https://docs.opencv.org/4.11.0/dc/df7/classcv_1_1barcode_1_1BarcodeDetector.html).
 
 ## Saved data
 
@@ -140,15 +169,19 @@ The scan's top-level `result.json` adds:
   encoded as base64;
 - `barcode.selected_index`: selected candidate, or null for manual/no selection.
 - `barcode_capture`: image source (`box.jpg` or separate `label.jpg`), mode,
-  and the original label capture ID for a two-step scan.
+  original label capture ID, and `source_frame` for a two-step scan.
+- `label_capture`: tap target, sensor focus window/position, each burst frame's
+  actual metadata and decoder output, and the default `primary_image`.
 - `source_image_size`, `processing_image_size`, `diagnostic_pixel_space`:
   capture and dimension-working sizes. Box points, edges, and barcode polygons
   use source pixels; fit/shift diagnostics, reference alignment, and the saved
   change mask use processing pixels.
 
-Each close-up attempt has a `label-<id>/` directory with its image, metadata,
-and ID record. An accepted two-step measurement also includes copies of
-`label.jpg` and `label.json` alongside `box.jpg`. The original pending-label
+Each label attempt has a `label-<id>/` directory with `label-01.jpg` through
+`label-03.jpg`, their metadata, and the ID record. `label.jpg`/`label.json` are
+aliases for the primary frame. An accepted two-step measurement includes all
+burst images/metadata and `label.jpg`/`label.json` for the selected ID alongside
+`box.jpg`. The original pending-label
 record remains as evidence; it is not an accepted measurement.
 
 Edits replace the JSON file atomically. The vision-only `review/result.json`

@@ -16,11 +16,17 @@ class FakeCamera:
         path.write_bytes(b"fake")
         return {"LensPosition": 1.0, "ScalerCrop": self.crop}
 
-    def capture_label(self, path):
+    def capture_labels(self, directory, target, **kwargs):
         from PIL import Image
 
-        Image.new("RGB", (1920, 1080), "white").save(path)
-        return {"LensPosition": 4.0, "ScalerCrop": self.crop}
+        frames = []
+        for index in range(1, 4):
+            path = directory / f"label-{index:02}.jpg"
+            Image.new("RGB", (1920, 1080), (index * 40, index * 40, index * 40)).save(path)
+            frames.append(
+                {"image": path.name, "metadata": {"LensPosition": 4.0, "ScalerCrop": self.crop}}
+            )
+        return {"frames": frames, "target": list(target)}
 
 
 def session(tmp_path, validator=lambda _: None, measure=None):
@@ -219,12 +225,13 @@ def test_separate_label_used_once_and_retained_for_failed_measurement(tmp_path):
     s.measure = original_measure
     result, _ = s.scan()
     assert result["package_id"] == "CLOSE-LABEL"
-    assert calls == ["label.jpg"]  # Measurement image cannot overwrite the queued ID.
+    assert calls == ["label-01.jpg", "label-02.jpg", "label-03.jpg"]
     assert s.pending_label is None
     assert result["barcode_capture"] == {
         "mode": "separate_label",
         "image": "label.jpg",
         "label_id": label["scan_id"],
+        "source_frame": "label-01.jpg",
     }
     assert (s.directory / "scan-0002/label.jpg").exists()
     assert (
@@ -264,53 +271,54 @@ def test_pending_multiple_labels_need_selection_and_stale_edit_rejected(tmp_path
     assert s.pending_label is None
 
 
-@pytest.mark.parametrize("focus_ok,capture_ok", [(True, True), (False, True), (True, False)])
-def test_label_focus_always_restores_station_position(tmp_path, monkeypatch, focus_ok, capture_ok):
-    from parcel_dimensioner import station
-    from parcel_dimensioner.camera.contracts import CameraError
-
-    restored = []
-
-    class Device:
-        def autofocus_cycle(self):
-            return focus_ok
-
-        def capture_file(self, path):
-            if not capture_ok:
-                raise CameraError("capture failed")
-            return {"LensPosition": 4.0}
-
-        def capture_metadata(self):
-            return {"LensPosition": 1.0}
-
-    monkeypatch.setattr(
-        station, "_set_manual_focus", lambda device, position: restored.append(position)
-    )
-    c = StationCamera(CameraSettings(lens_position=1.0))
-    c.camera = Device()
-    if focus_ok and capture_ok:
-        assert c.capture_label(tmp_path / "label.jpg")["LensPosition"] == 4.0
-    else:
-        with pytest.raises(CameraError):
-            c.capture_label(tmp_path / "label.jpg")
-    assert restored == [1.0]
-
-
 def test_label_capture_refused_when_station_focus_cannot_be_restored(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-
     from parcel_dimensioner import station
     from parcel_dimensioner.camera.contracts import CameraError
+    from parcel_dimensioner.label_capture import LabelRestoreError
 
-    monkeypatch.setattr(station, "_set_manual_focus", lambda *args: None)
+    def failed_restore(*args, **kwargs):
+        raise LabelRestoreError("Station camera settings could not be restored.")
+
+    monkeypatch.setattr(station, "capture_labels", failed_restore)
     c = StationCamera(CameraSettings(lens_position=1.0))
-    c.camera = SimpleNamespace(
-        autofocus_cycle=lambda: True,
-        capture_file=lambda _: {"LensPosition": 4.0},
-        capture_metadata=lambda: {"LensPosition": 4.0},
-    )
     with pytest.raises(CameraError, match="could not be restored"):
-        c.capture_label(tmp_path / "label.jpg")
+        c.capture_labels(tmp_path, (0.5, 0.5))
+    with pytest.raises(CameraError, match="could not be restored"):
+        c.capture(tmp_path / "box.jpg")
+
+
+def test_labels_across_burst_require_choice_and_keep_corresponding_frame(tmp_path):
+    s = session(tmp_path)
+    s.capture_empty()
+
+    def decode(path, **kwargs):
+        value = "A" if path.name == "label-01.jpg" else "B"
+        return {
+            "status": "found",
+            "selected_index": 0,
+            "candidates": [
+                {
+                    "value": value,
+                    "formats": ["Code 128"],
+                    "positions": [{"points": [[0, 0], [10, 0], [10, 10], [0, 10]]}],
+                }
+            ],
+        }
+
+    s.decoder = decode
+    label = s.scan_label((0.7, 0.6))
+    assert label["barcode"]["status"] == "multiple"
+    assert label["package_id"] is None
+    assert len(label["label_capture"]["frames"]) == 3
+    s.set_label_id(label["scan_id"], "B", 1)
+    result, _ = s.scan()
+    assert result["barcode_capture"]["source_frame"] == "label-02.jpg"
+    folder, _ = s.last_scan
+    assert (folder / "label.jpg").read_bytes() == (folder / "label-02.jpg").read_bytes()
+    assert all((folder / f"label-{i:02}.jpg").exists() for i in range(1, 4))
+    updated = s.set_package_id(result["scan_id"], "A", 0)
+    assert updated["barcode_capture"]["source_frame"] == "label-01.jpg"
+    assert (folder / "label.jpg").read_bytes() == (folder / "label-01.jpg").read_bytes()
 
 
 def test_marked_result_refresh_failure_does_not_undo_saved_id(tmp_path):

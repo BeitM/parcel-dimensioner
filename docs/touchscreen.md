@@ -77,15 +77,14 @@ at startup and locks that position; keep the wall patterns clearly visible.
    Tap **Capture empty station** to act immediately. The app checks both walls and the
    floor edge and zeros the scale. An unavailable scale does not prevent saving
    the image reference; the app explains that weight is unavailable.
-3. For the single-photo trial, place the box against both walls with its label
-   facing the camera and tap **Measure box**, without scanning a separate label.
-   Clear any pending label first. The original full-resolution photo supplies
-   both dimensions and barcode reading; stable weight is recorded with it.
-   To read a distant/angled label in a separate step, hold it closer and facing the camera, then
-   tap **Scan label**. Keep the whole barcode in the center and hold still while
-   it autofocuses. Check the pending ID (choose among multiple codes if needed).
-   The station focus is restored automatically. **Clear label** discards a
-   pending ID; this step is optional.
+3. Rest the box away from the corner and turn its barcode toward the camera.
+   Tap the barcode in **Live view**, then **Scan label**. A small focus box marks
+   the target. Keep the box still through targeted autofocus, three varied-exposure
+   photos, and decoding. Check the pending ID (choose among multiple codes if
+   needed). It does not need to be held close if enough detail is visible.
+   Station focus and automatic exposure are restored before measuring.
+   **Clear label** discards a pending ID. Without a pending label, Measure box
+   still attempts decoding from its own full-resolution image.
    Place that same box snugly against both walls and take your hands off. Tap **Measure
    box**. The app waits for stable weight, captures the image, and checks for
    movement across capture before calculating dimensions. The preview pauses

@@ -51,7 +51,7 @@ def unavailable(reason):
     }
 
 
-def decode_image(path: Path, *, outline=None):
+def decode_image(path: Path, *, outline=None, enhance=False):
     """Three bounded image-processing passes; never change focus or capture resolution.
 
     None scans the whole image for standalone diagnostics. The app supplies the
@@ -64,51 +64,73 @@ def decode_image(path: Path, *, outline=None):
         return unavailable("Install this project's [touchscreen] or [barcode] extra.")
     if outline is not None and len(outline) < 3:
         return unavailable("No usable box outline; enter the package ID manually.")
-    candidates = {}
     try:
         with Image.open(path) as source:
             image = source.convert("RGB")
         width, height = image.size
-        gray = ImageOps.autocontrast(ImageOps.grayscale(image))
-        # Explicit inversion also covers linear readers that do not implement try_invert.
-        for current in (image, gray, ImageOps.invert(gray)):
-            for code in zxingcpp.read_barcodes(
-                current,
-                try_rotate=True,
-                try_downscale=True,
-                try_invert=True,
-                return_errors=False,
-            ):
-                if not code.valid or not code.text:
-                    continue
-                p = code.position
-                points = [
-                    [v.x, v.y] for v in (p.top_left, p.top_right, p.bottom_right, p.bottom_left)
-                ]
-                center = [sum(v[i] for v in points) / 4 for i in (0, 1)]
-                if outline is not None and not _inside(center, outline):
-                    continue
-                candidate = candidates.setdefault(
-                    code.text,
-                    {
-                        "value": code.text,
-                        "formats": [],
-                        "positions": [],
-                        "raw_bytes_base64": [],
-                    },
-                )
-                format_name = str(code.format)
-                if format_name not in candidate["formats"]:
-                    candidate["formats"].append(format_name)
-                location = {"format": format_name, "points": points}
-                if location not in candidate["positions"]:
-                    candidate["positions"].append(location)
-                raw = base64.b64encode(code.bytes).decode("ascii")
-                if raw not in candidate["raw_bytes_base64"]:
-                    candidate["raw_bytes_base64"].append(raw)
+        identity = ((1, 0, 0), (0, 1, 0), (0, 0, 1))
+        if enhance:
+            from parcel_dimensioner.label_reader import label_views
+
+            views = label_views(image, outline)
+        else:
+            gray = ImageOps.autocontrast(ImageOps.grayscale(image))
+            views = ((current, identity) for current in (image, gray, ImageOps.invert(gray)))
+        candidates = _read_views(views, outline, zxingcpp, downscale=not enhance)
     except Exception as exc:
         return unavailable(f"Barcode decoding failed: {exc}")
-    found = list(candidates.values())
+    return barcode_result(
+        candidates,
+        image_size=[width, height],
+        region=(
+            "label_target" if enhance else "detected_box" if outline is not None else "full_image"
+        ),
+    )
+
+
+def _read_views(views, outline, decoder, *, downscale):
+    candidates = {}
+    for current, matrix in views:
+        for code in decoder.read_barcodes(
+            current, try_rotate=True, try_downscale=downscale, try_invert=True, return_errors=False
+        ):
+            if not code.valid or not code.text:
+                continue
+            p = code.position
+            points = [[v.x, v.y] for v in (p.top_left, p.top_right, p.bottom_right, p.bottom_left)]
+
+            def mapped(x, y, matrix=matrix):
+                scale = matrix[2][0] * x + matrix[2][1] * y + matrix[2][2]
+                if abs(scale) < 1e-9:
+                    raise ValueError("Invalid barcode coordinate transform")
+                return [round((row[0] * x + row[1] * y + row[2]) / scale, 3) for row in matrix[:2]]
+
+            points = [mapped(x, y) for x, y in points]
+            center = [sum(v[i] for v in points) / 4 for i in (0, 1)]
+            if outline is not None and not _inside(center, outline):
+                continue
+            candidate = candidates.setdefault(
+                code.text,
+                {
+                    "value": code.text,
+                    "formats": [],
+                    "positions": [],
+                    "raw_bytes_base64": [],
+                },
+            )
+            format_name = str(code.format)
+            if format_name not in candidate["formats"]:
+                candidate["formats"].append(format_name)
+            location = {"format": format_name, "points": points}
+            if location not in candidate["positions"]:
+                candidate["positions"].append(location)
+            raw = base64.b64encode(code.bytes).decode("ascii")
+            if raw not in candidate["raw_bytes_base64"]:
+                candidate["raw_bytes_base64"].append(raw)
+    return list(candidates.values())
+
+
+def barcode_result(found, *, image_size, region):
     selected = None
     status = "not_found" if not found else "multiple"
     reason = None
@@ -127,8 +149,8 @@ def decode_image(path: Path, *, outline=None):
         "reason": reason,
         "decoder": "zxing-cpp",
         "decoded_at": datetime.now(UTC).isoformat(),
-        "image_size": [width, height],
-        "region": "detected_box" if outline is not None else "full_image",
+        "image_size": image_size,
+        "region": region,
     }
 
 

@@ -96,6 +96,11 @@ def save_scan_review(folder: Path, result: dict):
     for index, candidate in enumerate(candidates):
         color = "#ff54de" if index == selected else "#ffad42"
         for location in candidate.get("positions", []):
+            if separate_label and location.get("image") not in (
+                None,
+                result.get("barcode_capture", {}).get("source_frame"),
+            ):
+                continue
             points = [tuple(p) for p in location["points"]]
             if len(points) != 4:
                 continue

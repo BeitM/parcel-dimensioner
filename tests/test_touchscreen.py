@@ -376,7 +376,8 @@ def test_pending_label_survives_retry_and_is_consumed_on_success(tmp_path, monke
         def put_nowait(self, action):
             if action == "empty":
                 self.events.put(("empty", "Ready"))
-            elif action == "label":
+            elif isinstance(action, tuple) and action[0] == "label":
+                assert action[1] == {"target": (0.5, 0.5)}
                 self.events.put(("label", label))
             else:
                 self.scans += 1
@@ -446,6 +447,104 @@ def test_pending_label_survives_retry_and_is_consumed_on_success(tmp_path, monke
     for stage in range(6):
         root.after(300 + stage * 350, lambda s=stage: check(s))
     root.after(4500, root.destroy)
+    touchscreen.launch_touchscreen(CameraSettings(), tmp_path, windowed=True)
+    assert not errors, errors
+
+
+def test_tap_label_targets_displayed_image_and_progress_stays_responsive(
+    tmp_path, monkeypatch, request
+):
+    if isolated_ui_case(request):
+        return
+    tk = pytest.importorskip("tkinter")
+    image = pytest.importorskip("PIL.Image")
+    from parcel_dimensioner import touchscreen
+    from parcel_dimensioner.settings import CameraSettings
+
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("No display for label target test")
+    monkeypatch.setattr(tk, "Tk", lambda: root)
+    monkeypatch.setattr(touchscreen, "_vision", lambda: None)
+    commands = []
+
+    class Worker:
+        def __init__(self, *_):
+            import threading
+
+            self.stopping = threading.Event()
+            self.events, self.frames = queue.Queue(), queue.Queue()
+            self.commands = self
+
+        def start(self):
+            self.events.put(("ready", str(tmp_path)))
+            self.frames.put(image.new("RGB", (800, 450), "#eeeeee"))
+
+        def is_alive(self):
+            return not self.stopping.is_set()
+
+        def join(self, **kwargs):
+            pass
+
+        def put_nowait(self, action):
+            commands.append(action)
+            self.events.put(("label_progress", "Taking label picture 2/3"))
+
+    monkeypatch.setattr(touchscreen, "StationWorker", Worker)
+
+    def descendants(widget):
+        for child in widget.winfo_children():
+            yield child
+            yield from descendants(child)
+
+    def button(text):
+        return next(
+            w for w in descendants(root) if isinstance(w, tk.Button) and w.cget("text") == text
+        )
+
+    errors = []
+
+    def check(stage):
+        try:
+            if stage == 0:
+                preview = next(
+                    w for w in descendants(root) if isinstance(w, tk.Label) and w.cget("image")
+                )
+                width = int(root.tk.call("image", "width", preview.cget("image")))
+                height = int(root.tk.call("image", "height", preview.cget("image")))
+                x = round((preview.winfo_width() - width) / 2 + 0.75 * width)
+                y = round((preview.winfo_height() - height) / 2 + 0.67 * height)
+                preview.event_generate("<Button-1>", x=x, y=y)
+            elif stage == 1:
+                snapshot_dir = os.environ.get("PARCEL_UI_SNAPSHOT_DIR")
+                if snapshot_dir and sys.platform == "win32":
+                    from PIL import ImageGrab
+
+                    Path(snapshot_dir).mkdir(exist_ok=True, parents=True)
+                    ImageGrab.grab(window=root.winfo_id()).save(
+                        Path(snapshot_dir) / "label-target.png"
+                    )
+                button("Scan label").invoke()
+            else:
+                assert commands[0][0] == "label"
+                assert commands[0][1]["target"] == pytest.approx((0.75, 0.67), abs=0.01)
+                values = [
+                    root.getvar(w.cget("textvariable"))
+                    for w in descendants(root)
+                    if isinstance(w, tk.Label) and w.cget("textvariable")
+                ]
+                assert "Taking label picture 2/3" in values
+                assert button("Scan label").cget("state") == "disabled"
+                assert button("Exit").cget("state") == "normal"
+        except Exception as exc:
+            errors.append(exc)
+        if stage == 2:
+            button("Exit").invoke()
+
+    for stage in range(3):
+        root.after(400 + stage * 400, lambda s=stage: check(s))
+    root.after(3500, root.destroy)
     touchscreen.launch_touchscreen(CameraSettings(), tmp_path, windowed=True)
     assert not errors, errors
 
