@@ -13,11 +13,18 @@ from parcel_dimensioner.label_capture import LabelRestoreError, capture_labels
 
 @pytest.fixture
 def camera(monkeypatch):
+    class Rectangle:
+        """Strict non-sequence object, as supplied by libcamera's Python binding."""
+
+        def __init__(self, x, y, width, height):
+            assert all(type(v) is int for v in (x, y, width, height))
+            self.values = (x, y, width, height)
+
     controls = SimpleNamespace(
         AfModeEnum=SimpleNamespace(Manual=0), AfMeteringEnum=SimpleNamespace(Auto=0, Windows=1)
     )
     monkeypatch.setitem(
-        sys.modules, "libcamera", SimpleNamespace(controls=controls, Rectangle=lambda *args: args)
+        sys.modules, "libcamera", SimpleNamespace(controls=controls, Rectangle=Rectangle)
     )
 
     class Camera:
@@ -37,7 +44,7 @@ def camera(monkeypatch):
                 "LensPosition": 1.0,
                 "ExposureTime": 50000,
                 "AnalogueGain": 3.0,
-                "ScalerCrop": [140, 250, 4000, 2250],
+                "ScalerCrop": (140, 250, 4000, 2250),
             }
             self.requests, self.captures = [], []
             self.focus_ok = True
@@ -46,6 +53,14 @@ def camera(monkeypatch):
             self.flushed = False
 
         def set_controls(self, values):
+            if "AfWindows" in values:
+                # Picamera2 0.3.38 Controls.get_libcamera_controls() distinguishes
+                # rectangle arrays by nested list/tuple, not Rectangle objects.
+                windows = values["AfWindows"]
+                if type(windows) in (list, tuple) and windows and type(windows[0]) in (list, tuple):
+                    self.windows = [Rectangle(*window) for window in windows]
+                else:
+                    self.windows = Rectangle(*windows)
             self.requests.append(values)
             if self.fail_restore and values.get("AeEnable") is True:
                 raise CameraError("restore failed")
@@ -83,6 +98,9 @@ def camera(monkeypatch):
 def test_targeted_focus_short_bracket_and_restore(camera, tmp_path):
     report = capture_labels(camera, 1.0, tmp_path, (0.8, 0.7))
     assert report["focus_window"] == [3100, 1645, 480, 360]
+    assert camera.windows[0].values == (3100, 1645, 480, 360)
+    assert isinstance(camera.metadata["ScalerCrop"], tuple)
+    assert report["frames"][0]["metadata"]["ScalerCrop"] == [140, 250, 4000, 2250]
     assert [frame["ExposureTime"] for frame in camera.captures] == [10000, 6000, 16000]
     assert all(1 <= frame["AnalogueGain"] <= 16 for frame in camera.captures)
     assert all(frame["LensPosition"] == 2.2 for frame in camera.captures)
@@ -139,3 +157,9 @@ def test_wrong_captured_exposure_is_rejected_and_metadata_retained(camera, tmp_p
     assert camera.metadata["LensPosition"] == 1.0
     record = json.loads((tmp_path / "label-01.json").read_text())
     assert record["metadata"]["ExposureTime"] == 50000
+
+
+def test_camera_contract_reproduces_prebuilt_rectangle_failure(camera):
+    rectangle = sys.modules["libcamera"].Rectangle(2028, 1477, 553, 415)
+    with pytest.raises(TypeError):
+        camera.set_controls({"AfWindows": [rectangle]})

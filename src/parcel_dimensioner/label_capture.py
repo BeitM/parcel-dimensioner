@@ -36,7 +36,6 @@ def _metadata(camera, cancel=None):
 def capture_labels(camera, position, directory, target=(0.5, 0.5), *, cancel=None, progress=None):
     """Three real full-resolution photos, without changing crop or station focus."""
     controls = importlib.import_module("libcamera").controls
-    rectangle = importlib.import_module("libcamera").Rectangle
     required = {
         "AfMode",
         "LensPosition",
@@ -49,7 +48,8 @@ def capture_labels(camera, position, directory, target=(0.5, 0.5), *, cancel=Non
     if not required.issubset(camera.camera_controls):
         raise CameraError("This camera does not expose the label focus/exposure controls.")
     bounds = target_bounds(target, width=0.12, height=0.16)
-    before = _metadata(camera, cancel)
+    # Normalize tuple/list metadata consistently with the saved capture below.
+    before = _plain_metadata(_metadata(camera, cancel))
     crop = before.get("ScalerCrop") or camera.camera_properties["ScalerCropMaximum"]
     x, y, w, h = crop
     window = (
@@ -65,7 +65,9 @@ def capture_labels(camera, position, directory, target=(0.5, 0.5), *, cancel=Non
         camera.set_controls(
             {
                 "AfMetering": controls.AfMeteringEnum.Windows,
-                "AfWindows": [rectangle(*window)],
+                # Picamera2 constructs the libcamera Rectangles itself. Passing
+                # prebuilt objects breaks its rectangle-array conversion.
+                "AfWindows": [window],
             }
         )
         if not _wait(camera, camera.autofocus_cycle(wait=False), cancel):
