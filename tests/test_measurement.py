@@ -90,6 +90,8 @@ def test_rendered_box_automatic_measurement(tmp_path, physical):
     empty, box = render_station(tmp_path, physical)
     result, _, _ = measure_pair(empty, box)
     dimensions = result["dimensions_inches"]
+    assert sum(edge["kind"] == "measured" for edge in result["box_edges_pixels"]) == 2
+    assert sum(edge["kind"] == "inferred" for edge in result["box_edges_pixels"]) >= 7
     # Detection thresholds/blur are approximate; errors must stay below 8 mm on clean geometry.
     expected_dimensions = [max(physical[:2]), min(physical[:2]), physical[2]]
     for name, expected in zip(["length", "width", "height"], expected_dimensions, strict=True):

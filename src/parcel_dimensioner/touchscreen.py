@@ -24,6 +24,7 @@ class StationWorker(threading.Thread):
         self.frames = queue.Queue(maxsize=1)
         self.stopping = threading.Event()
         self.scale = SerialScale(scale_settings)
+        self.review_warning = ""
 
     def run(self):
         camera = StationCamera(self.settings)
@@ -55,9 +56,13 @@ class StationWorker(threading.Thread):
                             self.scale.zero(self.stopping)
                             self.events.put(("zero", "Scale zeroed. Place a box to measure."))
                         elif command == "package_id":
-                            self.events.put(("package_id", session.set_package_id(**reason)))
+                            result = session.set_package_id(**reason)
+                            self.review_warning = session.review_warning
+                            self.events.put(("package_id", (result, session.review_path)))
                         else:
-                            self.events.put(("result", session.scan(dimensions_only_reason=reason)))
+                            result = session.scan(dimensions_only_reason=reason)
+                            self.review_warning = session.review_warning
+                            self.events.put(("result", result))
                     except ScaleError as exc:
                         event = "zero_error" if command == "zero" else "weight_error"
                         self.events.put((event, (str(exc), session.reference is not None)))
@@ -418,11 +423,20 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
                     heights = result.get("height_by_wall_inches", {})
                     if abs(heights.get("long", 0) - heights.get("short", 0)) > 0.25:
                         note += " Wall heights disagree; inspect marked result."
-                    status.set(note + " Replace the box and tap Measure box.")
+                    warning = getattr(worker, "review_warning", "")
+                    status.set(
+                        note + " " + warning
+                        if warning
+                        else note + " Replace the box and tap Measure box."
+                    )
                 elif event == "package_id":
-                    state.update(busy=False, result=payload)
+                    result, path = payload
+                    state.update(busy=False, result=result)
+                    with Image.open(path) as im:
+                        state["review"] = im.copy()
                     update_package()
-                    status.set("Package ID saved with this scan.")
+                    warning = getattr(worker, "review_warning", "")
+                    status.set("Package ID saved with this scan. " + warning)
                 elif event == "package_id_error":
                     state["busy"] = False
                     status.set("Could not save package ID: " + payload[0])

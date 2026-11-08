@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import time
+from contextlib import suppress
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,6 +30,7 @@ from parcel_dimensioner.measurement import (
     _floor_line,
     _vision,
 )
+from parcel_dimensioner.review import save_scan_review
 from parcel_dimensioner.settings import CameraSettings
 
 
@@ -105,6 +107,7 @@ class ScanSession:
         scale=None,
         cancel=None,
         decoder=decode_image,
+        reviewer=save_scan_review,
     ):
         from parcel_dimensioner.measurement import save_measurement
 
@@ -123,6 +126,9 @@ class ScanSession:
         self.cancel = cancel
         self.decoder = decoder
         self.last_scan = None
+        self.reviewer = reviewer
+        self.review_path = None
+        self.review_warning = ""
 
     def _capture(self, path):
         metadata = self.camera.capture(path)
@@ -180,7 +186,8 @@ class ScanSession:
             }
             self._save_result(folder, result)
             self.last_scan = folder, result
-            return result, folder / "review" / "measurement.jpg"
+            self._update_review(folder, result)
+            return result, self.review_path
         except Exception as exc:
             (folder / "error.txt").write_text(str(exc), encoding="utf-8")
             (folder / "attempt.json").write_text(
@@ -210,4 +217,24 @@ class ScanSession:
         result = with_identity(original, value, candidate_index)
         self._save_result(folder, result)
         self.last_scan = folder, result
+        self._update_review(folder, result)
         return result
+
+    def _update_review(self, folder, result):
+        self.review_warning = ""
+        try:
+            self.review_path = self.reviewer(folder, result)
+            with suppress(OSError):
+                (folder / "review" / "overlay-error.txt").unlink(missing_ok=True)
+        except Exception as exc:
+            # The JSON is authoritative. A derived-image failure must not undo
+            # the saved ID or leave an old ID displayed in the review image.
+            self.review_path = folder / "review" / "measurement.jpg"
+            self.review_warning = f"Marked barcode/ID overlay unavailable: {exc}"
+            for name in ("scan.jpg", "scan.tmp.jpg"):
+                with suppress(OSError):
+                    (folder / "review" / name).unlink(missing_ok=True)
+            with suppress(OSError):
+                (folder / "review" / "overlay-error.txt").write_text(
+                    self.review_warning, encoding="utf-8"
+                )

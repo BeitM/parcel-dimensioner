@@ -198,7 +198,11 @@ def test_barcode_selection_touch_keyboard_and_clearing_next_scan(tmp_path, monke
                     self.result, payload["value"], payload["candidate_index"]
                 )
                 saved.append(self.result)
-                self.events.put(("package_id", self.result))
+                updated_image = tmp_path / f"updated-id-{len(saved)}.jpg"
+                image_module.new("RGB", (640, 360), (70 + len(saved) * 20, 0, 0)).save(
+                    updated_image
+                )
+                self.events.put(("package_id", (self.result, updated_image)))
             else:
                 self.scans += 1
                 candidates = (
@@ -253,6 +257,7 @@ def test_barcode_selection_touch_keyboard_and_clearing_next_scan(tmp_path, monke
                 button("Measure box").invoke()
             elif stage == 2:
                 assert any("2 barcodes found" in v for v in values())
+                button("Marked result").invoke()
                 button("Choose ID").invoke()
                 assert button("Measure box").cget("state") == "disabled"
             elif stage == 3:
@@ -279,6 +284,11 @@ def test_barcode_selection_touch_keyboard_and_clearing_next_scan(tmp_path, monke
             elif stage == 4:
                 assert saved[-1]["package_id"] == "PKG-B"
                 assert "Package ID: PKG-B" in values()
+                preview = next(
+                    w for w in descendants(root) if isinstance(w, tk.Label) and w.cget("image")
+                )
+                pixel = root.tk.call(preview.cget("image"), "get", 0, 0)
+                assert pixel[0] > 50 and pixel[1] < 20 and pixel[2] < 20
                 button("Edit ID").invoke()
                 button("Clear").invoke()
                 for character in "MAN42":

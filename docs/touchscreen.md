@@ -107,13 +107,20 @@ Images and results stay on the Pi under
 `data/captures/station-<time>-<id>/`. Each empty capture has its own JPEG and JSON
 metadata. Each scan gets a numbered folder with `box.jpg`, capture metadata,
 `review/result.json`, `review/measurement.jpg`, and `review/change-mask.png`.
+**Marked result** displays `review/scan.jpg`, which combines thicker box outlines,
+measurement guides, barcode highlights, and the selected/manual package ID.
+Green is the detected boundary, yellow is the measured top edges, and blue dashed
+lines are inferred cuboid edges. Selected barcode regions are pink; other
+decoded candidates are orange. The ID and barcode values are listed below the
+image. Editing an ID refreshes this review, including while it is being viewed.
 The scan's **top-level `result.json`** contains dimensions AND weight (or the
 explicit missing-weight reason); the review JSON is the vision-only report.
 The top-level file also contains the barcode candidates, selected/manual package
 ID, and timestamped ID-edit history. A new scan clears the previous package ID.
 Failed attempts retain an `error.txt` and `attempt.json`, plus any images already
-captured. A failure before capture has no box image. Existing images are not
-overwritten. These runtime files are ignored by Git.
+captured. A failure before capture has no box image. Original capture images are
+not overwritten. The derived `review/scan.jpg` is regenerated after ID edits.
+These runtime files are ignored by Git.
 
 The application owns one camera for preview and all captures, with unchanged
 resolution and locked focus throughout the session. Camera and measurement work

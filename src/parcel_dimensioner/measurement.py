@@ -319,6 +319,46 @@ def measure_pair(
         "width": min(sides) / 25.4,
         "height": float(np.mean(heights)) / 25.4,
     }
+    # Visualization only: complete the cuboid from the two wall-axis vanishing
+    # directions. These extra edges are inferred, never measurement inputs.
+    review_edges = [
+        {"start": rear.tolist(), "end": end.tolist(), "kind": "measured"} for end in ends
+    ]
+    try:
+        bottoms = []
+        for end, wall, (_, floor_y) in zip(ends, walls, floor_lines, strict=True):
+            xy = _project([end], wall["inverse"], cv, np)[0]
+            bottoms.append(_project([(xy[0], floor_y)], wall["matrix"], cv, np)[0])
+        directions = [wall["matrix"][:, 0] for wall in walls]
+
+        def across(point, direction):
+            return np.cross([*point, 1], direction)
+
+        front = _intersection(across(ends[0], directions[1]), across(ends[1], directions[0]), np)
+        front_bottom = _intersection(
+            across(bottoms[0], directions[1]), across(bottoms[1], directions[0]), np
+        )
+        proposed = [
+            (ends[0], front),
+            (ends[1], front),
+            (ends[0], bottoms[0]),
+            (ends[1], bottoms[1]),
+            (front, front_bottom),
+            (bottoms[0], front_bottom),
+            (bottoms[1], front_bottom),
+            (rear, floor),
+        ]
+        if all(
+            np.isfinite(p).all() and 0 <= p[0] < box.shape[1] and 0 <= p[1] < box.shape[0]
+            for edge in proposed
+            for p in edge
+        ):
+            review_edges.extend(
+                {"start": np.asarray(a).tolist(), "end": np.asarray(b).tolist(), "kind": "inferred"}
+                for a, b in proposed
+            )
+    except (MeasurementError, ValueError, FloatingPointError):
+        pass  # Keep actual detection visible even when a wireframe cannot be inferred.
     result = {
         "status": "experimental",
         "method": "automatic-fixed-wall-silhouette",
@@ -340,40 +380,14 @@ def measure_pair(
             "rear_top_by_wall": [p.tolist() for p in rear_by_wall],
         },
         "box_contour_pixels": cv.approxPolyDP(contour, 1.0, True).reshape(-1, 2).tolist(),
+        "box_edges_pixels": review_edges,
         "wall_fit_rms_pixels": {w["spec"].name: w["fit_rms_pixels"] for w in walls},
         "wall_shift_p95_pixels": dict(zip((s.name for s in BOARDS), shifts, strict=True)),
         "warnings": warnings,
     }
-    annotated = box.copy()
-    for end in ends:
-        cv.line(annotated, tuple(np.int32(rear)), tuple(np.int32(end)), (0, 255, 255), 2)
-    for label, point in [
-        ("Floor", floor),
-        ("Rear top", rear),
-        *[(spec.name, end) for spec, end in zip(BOARDS, ends, strict=True)],
-    ]:
-        p = tuple(np.int32(point))
-        cv.circle(annotated, p, 5, (0, 0, 255), -1)
-        cv.putText(
-            annotated,
-            label,
-            (p[0] + 8, p[1] - 12),
-            cv.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            (0, 0, 0),
-            4,
-            cv.LINE_AA,
-        )
-        cv.putText(
-            annotated,
-            label,
-            (p[0] + 8, p[1] - 12),
-            cv.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            (0, 255, 255),
-            1,
-            cv.LINE_AA,
-        )
+    from parcel_dimensioner.review import draw_box_review
+
+    annotated = draw_box_review(box, result, cv, np)
     return result, annotated, mask
 
 

@@ -100,6 +100,17 @@ Edits replace the JSON file atomically. The vision-only `review/result.json`
 does not contain the barcode or later ID edits. Use the top-level result as
 the combined record.
 
+**Marked result** displays `review/scan.jpg`: the thicker box outline and
+measurement guides plus polygons around all decoded barcode locations. Pink
+marks the selected barcode; orange marks other candidates. Numbered labels map
+to the candidate values below the image. The selected package ID is shown in
+full in that panel, with manual entries explicitly labelled. Up to four
+candidate values are listed; additional values remain available in Choose ID.
+The marked image is regenerated from the same vision image whenever an ID is
+saved, so it also refreshes if it is already open. An overlay-write failure
+keeps the authoritative JSON/ID saved, shows a warning, and falls back to the
+vision-only image rather than displaying an old ID.
+
 ## Offline diagnostic command
 
 To test a saved image without opening the camera or the touchscreen:

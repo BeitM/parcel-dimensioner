@@ -23,7 +23,14 @@ def session(tmp_path, validator=lambda _: None, measure=None):
         output.mkdir()
         return {"dimensions_inches": {"length": 3, "width": 2, "height": 1}}
 
-    return ScanSession(tmp_path, FakeCamera(), CameraSettings(), validator, measure or fake_measure)
+    return ScanSession(
+        tmp_path,
+        FakeCamera(),
+        CameraSettings(),
+        validator,
+        measure or fake_measure,
+        reviewer=lambda folder, result: folder / "review" / "measurement.jpg",
+    )
 
 
 def test_reference_reused_and_scans_saved_separately(tmp_path):
@@ -180,6 +187,27 @@ def test_barcode_failure_keeps_dimensions_and_weight(tmp_path):
     assert result["dimensions_inches"]["length"] == 3
     assert result["barcode"]["status"] == "unavailable"
     assert result["package_id"] is None
+
+
+def test_marked_result_refresh_failure_does_not_undo_saved_id(tmp_path):
+    s = session(tmp_path)
+    s.capture_empty()
+    result, _ = s.scan()
+    stale = s.directory / "scan-0001/review/scan.jpg"
+    stale.write_bytes(b"stale ID overlay")
+
+    def unavailable_review(*_):
+        raise OSError("Cannot write overlay")
+
+    s.reviewer = unavailable_review
+    updated = s.set_package_id(result["scan_id"], "SAVED-42")
+    assert updated["package_id"] == "SAVED-42"
+    assert s.last_scan[1]["package_id"] == "SAVED-42"
+    stored = json.loads((s.directory / "scan-0001/result.json").read_text())
+    assert stored["package_id"] == "SAVED-42"
+    assert "Cannot write overlay" in s.review_warning
+    assert s.review_path.name == "measurement.jpg"
+    assert not stale.exists()
 
 
 def test_camera_focus_mismatch_rejected_and_close_releases_owner(tmp_path):
