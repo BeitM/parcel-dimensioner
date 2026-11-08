@@ -74,6 +74,13 @@ requires an explicit dimensions-only choice. The top-level scan `result.json`
 contains both capabilities; the existing review JSON remains vision-only.
 See [scale setup](scale.md) and [touchscreen operation](touchscreen.md).
 
+Barcode reading runs on the same camera/vision worker against the saved package
+image at its original resolution. Candidate centers must lie in the selected
+box contour. Decoding failure preserves dimensions/weight. Multiple unique
+values require operator selection; manual entry/selection updates only the
+current scan ID through an atomic result-file replacement and edit history.
+See [barcode operation](barcodes.md). Network sharing remains future work.
+
 ## Measurement constraint
 
 A single uncalibrated RGB image cannot robustly recover all three dimensions of

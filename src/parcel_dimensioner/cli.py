@@ -67,6 +67,8 @@ def build_parser() -> argparse.ArgumentParser:
     measure.add_argument("--output-dir", type=Path, required=True, help="new folder for results")
     measure.add_argument("--square-mm", type=float, default=38.1, help="actual printed square size")
     measure.add_argument("--marker-mm", type=float, default=28.0, help="actual printed marker size")
+    barcode = commands.add_parser("barcode-read", help="test barcode decoding on a saved image")
+    barcode.add_argument("--image", type=Path, required=True)
     touchscreen = commands.add_parser("touchscreen", help="open the Pi touchscreen scanner app")
     touchscreen.add_argument("--windowed", action="store_true", help="open in a regular window")
     touchscreen.add_argument("--lens-position", type=_nonnegative_float)
@@ -78,6 +80,14 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.command == "barcode-read":
+            from parcel_dimensioner.barcodes import decode_image, initial_identity
+
+            result = decode_image(args.image)
+            print(json.dumps({"barcode": result, **initial_identity(result)}, indent=2))
+            if result["status"] == "unavailable":
+                return 2
+            return 0 if result["candidates"] else 1
         if args.command == "desktop-install":
             from parcel_dimensioner.desktop import install_desktop
 

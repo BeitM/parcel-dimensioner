@@ -14,7 +14,8 @@ The application is intentionally split by capability:
 - **Camera** — owns Picamera2 and produces images plus capture metadata.
 - **Measurement** — estimates dimensions of a rectangular box touching both
   ChArUco walls, using an empty reference image.
-- **Barcode** — will decode the parcel identifier from an image.
+- **Barcode** — decodes package-image barcodes and supports selecting or entering
+  an ID on the touchscreen; see [barcode operation](docs/barcodes.md).
 - **Scale** — Pico/HX711 USB readings, explicit zeroing, stability checks, and
   pounds saved with the touchscreen scan; see [scale setup](docs/scale.md).
 - **Workflow** — pairs dimensions and weight in a saved scan record.
@@ -22,7 +23,7 @@ The application is intentionally split by capability:
   display.
 
 Camera capture, experimental dimensions, and a touchscreen combined dimension/weight
-workflow exist today. Barcode and company-system delivery remain planned.
+workflow exist today, with barcode/package ID capture. Company-system delivery remains planned.
 
 See [docs/architecture.md](docs/architecture.md) for the boundaries and staged
 roadmap.

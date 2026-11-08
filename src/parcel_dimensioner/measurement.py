@@ -339,6 +339,7 @@ def measure_pair(
             "wall_top_ends": [p.tolist() for p in ends],
             "rear_top_by_wall": [p.tolist() for p in rear_by_wall],
         },
+        "box_contour_pixels": cv.approxPolyDP(contour, 1.0, True).reshape(-1, 2).tolist(),
         "wall_fit_rms_pixels": {w["spec"].name: w["fit_rms_pixels"] for w in walls},
         "wall_shift_p95_pixels": dict(zip((s.name for s in BOARDS), shifts, strict=True)),
         "warnings": warnings,

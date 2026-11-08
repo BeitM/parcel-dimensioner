@@ -1,7 +1,8 @@
 # Box Scanner touchscreen app
 
 The Pi can run a local fullscreen app with a live camera view, large touch
-buttons, dimensions in inches, and weight in pounds. No browser, network server, or company
+buttons, dimensions in inches, weight in pounds, and automatic barcode/package
+ID reading. No browser, network server, or company
 API is needed. The desktop launcher opens this app; it does not start on boot.
 
 ## Transfer the changes from the laptop
@@ -75,6 +76,11 @@ at startup and locks that position; keep the wall patterns clearly visible.
    movement across capture before calculating dimensions. The preview pauses
    during this operation; the live scale status continues updating.
 4. Read **Length, Width, Height** in inches and **Saved weight** in pounds.
+   The **Package ID** row shows whether a barcode was found. Use **Choose ID**
+   for multiple codes, or **Enter ID / Edit ID** for manual entry/correction with
+   the built-in touch keyboard. **Save ID** updates this scan's saved record.
+   Barcode failure does not discard dimensions or weight. See [barcode setup
+   and operation](barcodes.md) for details and label tests.
    **Live scale** is a separate current reading; removing a box does not change
    its saved weight. Tap **Marked result** to inspect the chosen points,
    then **Live view** to return to the camera. Results are saved automatically.
@@ -103,6 +109,8 @@ metadata. Each scan gets a numbered folder with `box.jpg`, capture metadata,
 `review/result.json`, `review/measurement.jpg`, and `review/change-mask.png`.
 The scan's **top-level `result.json`** contains dimensions AND weight (or the
 explicit missing-weight reason); the review JSON is the vision-only report.
+The top-level file also contains the barcode candidates, selected/manual package
+ID, and timestamped ID-edit history. A new scan clears the previous package ID.
 Failed attempts retain an `error.txt` and `attempt.json`, plus any images already
 captured. A failure before capture has no box image. Existing images are not
 overwritten. These runtime files are ignored by Git.
@@ -117,7 +125,7 @@ scan is explicitly triggered by a tap. Review results before using them elsewher
 ## Current limits
 
 This app automates the existing **experimental** measurement method; it does not
-improve dimension accuracy or add lens calibration, barcode, or webhook
+improve dimension accuracy or add lens calibration or webhook
 delivery. It uses the current project's wall layouts and nominal 1.5-inch square
 spacing. The empty station must actually be empty; the wall
 checks cannot prove that all objects have been removed.

@@ -144,6 +144,180 @@ def test_buttons_result_and_error_clear_stale_dimensions(tmp_path, monkeypatch, 
     assert not errors, errors
 
 
+def test_barcode_selection_touch_keyboard_and_clearing_next_scan(tmp_path, monkeypatch, request):
+    if isolated_ui_case(request):
+        return
+    tk = pytest.importorskip("tkinter")
+    image_module = pytest.importorskip("PIL.Image")
+    from parcel_dimensioner import touchscreen
+    from parcel_dimensioner.barcodes import with_identity
+    from parcel_dimensioner.settings import CameraSettings
+
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("No display for barcode editor check")
+    root.overrideredirect(True)
+    geometry = root.geometry
+    geometry("480x853+0+0")
+    monkeypatch.setattr(root, "geometry", lambda _: geometry("480x853+0+0"))
+    monkeypatch.setattr(root, "winfo_screenwidth", lambda: 480)
+    monkeypatch.setattr(root, "winfo_screenheight", lambda: 853)
+    monkeypatch.setattr(tk, "Tk", lambda: root)
+    monkeypatch.setattr(touchscreen, "_vision", lambda: None)
+    marked = tmp_path / "marked.jpg"
+    image_module.new("RGB", (640, 360), "gray").save(marked)
+    saved = []
+
+    class Worker:
+        def __init__(self, *_):
+            import threading
+
+            self.events, self.frames = queue.Queue(), queue.Queue()
+            self.stopping = threading.Event()
+            self.commands = self
+            self.result = None
+            self.scans = 0
+
+        def start(self):
+            self.events.put(("ready", str(tmp_path)))
+
+        def is_alive(self):
+            return not self.stopping.is_set()
+
+        def join(self, **_):
+            pass
+
+        def put_nowait(self, action):
+            if action == "empty":
+                self.events.put(("empty", "Empty station captured."))
+            elif isinstance(action, tuple) and action[0] == "package_id":
+                payload = action[1]
+                assert payload["scan_id"] == self.result["scan_id"]
+                self.result = with_identity(
+                    self.result, payload["value"], payload["candidate_index"]
+                )
+                saved.append(self.result)
+                self.events.put(("package_id", self.result))
+            else:
+                self.scans += 1
+                candidates = (
+                    [
+                        {"value": "PKG-A", "formats": ["Code 128"]},
+                        {"value": "PKG-B", "formats": ["QR Code"]},
+                    ]
+                    if self.scans == 1
+                    else []
+                )
+                self.result = {
+                    "scan_id": f"scan-{self.scans}",
+                    "dimensions_inches": {"length": 9, "width": 8, "height": 3},
+                    "weight": {"pounds": 5},
+                    "package_id": None,
+                    "package_id_source": None,
+                    "package_id_history": [],
+                    "barcode": {
+                        "status": "multiple" if candidates else "not_found",
+                        "candidates": candidates,
+                        "selected_index": None,
+                    },
+                }
+                self.events.put(("result", (self.result, marked)))
+
+    monkeypatch.setattr(touchscreen, "StationWorker", Worker)
+
+    def descendants(widget):
+        for child in widget.winfo_children():
+            yield child
+            yield from descendants(child)
+
+    def button(text):
+        return next(
+            w for w in descendants(root) if isinstance(w, tk.Button) and w.cget("text") == text
+        )
+
+    def values():
+        return [
+            root.getvar(w.cget("textvariable"))
+            for w in descendants(root)
+            if isinstance(w, tk.Label) and w.cget("textvariable")
+        ]
+
+    errors = []
+
+    def check(stage):
+        try:
+            if stage == 0:
+                button("Capture empty station").invoke()
+            elif stage == 1:
+                button("Measure box").invoke()
+            elif stage == 2:
+                assert any("2 barcodes found" in v for v in values())
+                button("Choose ID").invoke()
+                assert button("Measure box").cget("state") == "disabled"
+            elif stage == 3:
+                listing = next(w for w in descendants(root) if isinstance(w, tk.Listbox))
+                dialog = next(w for w in root.winfo_children() if isinstance(w, tk.Toplevel))
+                for control in descendants(dialog):
+                    if isinstance(control, tk.Button):
+                        x = control.winfo_rootx() - dialog.winfo_rootx()
+                        y = control.winfo_rooty() - dialog.winfo_rooty()
+                        assert x >= 0 and x + control.winfo_width() <= dialog.winfo_width()
+                        assert y >= 0 and y + control.winfo_height() <= dialog.winfo_height()
+                snapshot_dir = os.environ.get("PARCEL_UI_SNAPSHOT_DIR")
+                if snapshot_dir and sys.platform == "win32":
+                    from PIL import ImageGrab
+
+                    Path(snapshot_dir).mkdir(exist_ok=True, parents=True)
+                    ImageGrab.grab(window=dialog.winfo_id()).save(
+                        Path(snapshot_dir) / "barcode-editor.png"
+                    )
+                listing.selection_set(1)
+                listing.event_generate("<<ListboxSelect>>")
+                root.update_idletasks()
+                button("Save ID").invoke()
+            elif stage == 4:
+                assert saved[-1]["package_id"] == "PKG-B"
+                assert "Package ID: PKG-B" in values()
+                button("Edit ID").invoke()
+                button("Clear").invoke()
+                for character in "MAN42":
+                    button(character).invoke()
+                button("Save ID").invoke()
+            elif stage == 5:
+                assert saved[-1]["package_id"] == "MAN42"
+                assert "Manual ID saved" in values()
+                button("Measure box").invoke()
+                assert not any("MAN42" in v for v in values())
+            elif stage == 6:
+                assert "Package ID: —" in values()
+                assert any("No barcode found" in v for v in values())
+                assert button("Enter ID").cget("state") == "normal"
+                button("Enter ID").invoke()
+                button("4").invoke()
+                button("2").invoke()
+                button("Save ID").invoke()
+            else:
+                assert saved[-1]["scan_id"] == "scan-2"
+                assert saved[-1]["package_id"] == "42"
+                assert saved[-1]["dimensions_inches"]["length"] == 9
+                assert saved[-1]["weight"]["pounds"] == 5
+        except Exception as exc:
+            errors.append(exc)
+        if stage == 7:
+            # Release any dialog even if a previous stage failed.
+            for w in list(root.winfo_children()):
+                if isinstance(w, tk.Toplevel):
+                    w.destroy()
+            button("Exit").invoke()
+
+    for stage in range(8):
+        root.after(300 + stage * 350, lambda s=stage: check(s))
+    root.after(6000, root.destroy)
+    touchscreen.launch_touchscreen(CameraSettings(), tmp_path, windowed=True)
+    assert not errors, errors
+
+
 @pytest.mark.parametrize("width,height", [(480, 853), (720, 1280), (1000, 680)])
 def test_layout_fallback_and_saved_weight_separate_from_live(
     tmp_path, monkeypatch, width, height, request
@@ -211,6 +385,16 @@ def test_layout_fallback_and_saved_weight_separate_from_live(
                             {
                                 "dimensions_inches": {"length": 9, "width": 8, "height": 3},
                                 "weight": {"pounds": weight},
+                                "scan_id": "layout-scan",
+                                "package_id": "PKG-1234567890",
+                                "package_id_source": "barcode",
+                                "barcode": {
+                                    "status": "found",
+                                    "selected_index": 0,
+                                    "candidates": [
+                                        {"value": "PKG-1234567890", "formats": ["Code 128"]}
+                                    ],
+                                },
                             },
                             marked,
                         ),
@@ -272,7 +456,7 @@ def test_layout_fallback_and_saved_weight_separate_from_live(
 
                     target = Path(snapshot_dir)
                     target.mkdir(exist_ok=True, parents=True)
-                    ImageGrab.grab(window=root.winfo_id()).save(target / f"scale-ui-{width}.png")
+                    ImageGrab.grab(window=root.winfo_id()).save(target / f"barcode-ui-{width}.png")
         except Exception as exc:
             errors.append(exc)
         if stage == 4:

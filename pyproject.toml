@@ -16,8 +16,10 @@ touchscreen = [
   "Pillow>=10,<13",
   "numpy>=1.24,<3",
   "opencv-contrib-python-headless>=4.8,<5",
-    "pyserial>=3.5,<4",
+  "pyserial>=3.5,<4",
+  "zxing-cpp>=2.3,<4",
 ]
+barcode = ["Pillow>=10,<13", "zxing-cpp>=2.3,<4"]
 scale = ["pyserial>=3.5,<4"]
 vision = [
   "numpy>=1.24,<3",

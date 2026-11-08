@@ -48,7 +48,8 @@ were not tested results. Confirm the actual acceptance requirements before use.
 - Earlier plan: Pico owns scale acquisition, filtering/stability, tare, and the
   physical button. Implemented 2026-11-07: Pico streams raw HX711 samples; the
   main Pi handles calibration, explicit zeroing, stability, images, dimensions,
-  UI, and combined record storage. Barcode and the physical button remain future work.
+  UI, and combined record storage. Barcode/package-ID capture was added on
+  2026-11-08; the physical button and company-system delivery remain future work.
 - No dedicated barcode reader or additional depth sensor was selected for the
   baseline; consider changes only if representative tests expose a limitation.
 

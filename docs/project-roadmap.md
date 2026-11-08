@@ -11,7 +11,8 @@ Current implementation (2026-11-07): camera capture, experimental fixed-wall
 dimensions, a touchscreen UI, Pico/HX711 weighing, and combined local result
 storage are implemented. The new weighing/app integration still needs on-Pi
 validation; the prior raw scale tests worked with 5 lb and 10 lb reference loads.
-Lens calibration, barcode, and company-system delivery remain future work.
+Barcode decoding, candidate selection, and manual package-ID entry have since
+been added to the touchscreen. Lens calibration and company-system delivery remain future work.
 See [touchscreen operation](touchscreen.md) and [scale setup](scale.md).
 
 Earlier project chats have now been reviewed; see [project-context.md](project-context.md).

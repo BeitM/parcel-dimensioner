@@ -10,6 +10,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+from parcel_dimensioner.barcodes import (
+    PackageIdError,
+    decode_image,
+    initial_identity,
+    with_identity,
+)
 from parcel_dimensioner.camera.contracts import CameraError
 from parcel_dimensioner.camera.picamera2_backend import (
     _load_picamera2,
@@ -98,6 +104,7 @@ class ScanSession:
         measure=None,
         scale=None,
         cancel=None,
+        decoder=decode_image,
     ):
         from parcel_dimensioner.measurement import save_measurement
 
@@ -114,6 +121,8 @@ class ScanSession:
         self.counter = 0
         self.scale = scale
         self.cancel = cancel
+        self.decoder = decoder
+        self.last_scan = None
 
     def _capture(self, path):
         metadata = self.camera.capture(path)
@@ -126,6 +135,7 @@ class ScanSession:
         return metadata
 
     def capture_empty(self):
+        self.last_scan = None
         self.reference = self.reference_metadata = None
         path = self.directory / f"empty-{uuid4().hex[:8]}.jpg"
         metadata = self._capture(path)
@@ -134,6 +144,7 @@ class ScanSession:
         return path
 
     def scan(self, *, dimensions_only_reason=None):
+        self.last_scan = None
         if self.reference is None:
             raise MeasurementError("Capture the empty station first.")
         self.counter += 1
@@ -158,12 +169,17 @@ class ScanSession:
                 self.reference = None
                 raise MeasurementError("Camera crop changed. Capture a new empty station.")
             result = self.measure(self.reference, path, folder / "review")
+            barcode = self.decoder(path, outline=result.get("box_contour_pixels", []))
             result = {
                 **result,
+                "scan_id": uuid4().hex,
                 "weight": weight,
                 "scan_mode": "dimensions_and_weight" if ticket else "dimensions_only",
+                "barcode": barcode,
+                **initial_identity(barcode),
             }
-            (folder / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+            self._save_result(folder, result)
+            self.last_scan = folder, result
             return result, folder / "review" / "measurement.jpg"
         except Exception as exc:
             (folder / "error.txt").write_text(str(exc), encoding="utf-8")
@@ -180,3 +196,18 @@ class ScanSession:
                 encoding="utf-8",
             )
             raise
+
+    @staticmethod
+    def _save_result(folder, result):
+        temporary = folder / "result.json.tmp"
+        temporary.write_text(json.dumps(result, indent=2), encoding="utf-8")
+        temporary.replace(folder / "result.json")
+
+    def set_package_id(self, scan_id, value, candidate_index=None):
+        if self.last_scan is None or self.last_scan[1]["scan_id"] != scan_id:
+            raise PackageIdError("This scan is no longer current. Measure the box again.")
+        folder, original = self.last_scan
+        result = with_identity(original, value, candidate_index)
+        self._save_result(folder, result)
+        self.last_scan = folder, result
+        return result

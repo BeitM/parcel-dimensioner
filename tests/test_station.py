@@ -128,6 +128,60 @@ def test_weight_change_after_photo_prevents_accepted_result(tmp_path):
     assert not (s.directory / "scan-0001/result.json").exists()
 
 
+def test_package_id_saved_on_exact_scan_and_never_reused(tmp_path, monkeypatch):
+    from parcel_dimensioner.barcodes import PackageIdError
+
+    barcode = {
+        "status": "found",
+        "selected_index": 0,
+        "candidates": [{"value": "AUTO-123", "formats": ["Code 128"]}],
+    }
+    s = session(tmp_path)
+    s.decoder = lambda *a, **kw: barcode
+    s.capture_empty()
+    result, _ = s.scan()
+    scan_id = result["scan_id"]
+    assert result["package_id"] == "AUTO-123"
+    updated = s.set_package_id(scan_id, "MANUAL-42")
+    record = s.directory / "scan-0001/result.json"
+    assert json.loads(record.read_text())["package_id"] == "MANUAL-42"
+    assert updated["dimensions_inches"] == result["dimensions_inches"]
+    assert updated["weight"] == result["weight"]
+    assert len(updated["package_id_history"]) == 2
+    assert not record.with_suffix(".json.tmp").exists()
+
+    def fail_write(*_):
+        raise OSError("disk full")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(s, "_save_result", fail_write)
+        with pytest.raises(OSError, match="disk full"):
+            s.set_package_id(scan_id, "NOT-SAVED")
+    assert s.last_scan[1]["package_id"] == "MANUAL-42"
+    assert json.loads(record.read_text())["package_id"] == "MANUAL-42"
+    s.decoder = lambda *a, **kw: {"status": "not_found", "selected_index": None, "candidates": []}
+    second, _ = s.scan()
+    assert second["scan_id"] != scan_id
+    assert second["package_id"] is None
+    with pytest.raises(PackageIdError, match="no longer current"):
+        s.set_package_id(scan_id, "STALE-ID")
+
+
+def test_barcode_failure_keeps_dimensions_and_weight(tmp_path):
+    s = session(tmp_path)
+    s.decoder = lambda *a, **kw: {
+        "status": "unavailable",
+        "selected_index": None,
+        "candidates": [],
+        "reason": "Decoder missing",
+    }
+    s.capture_empty()
+    result, _ = s.scan()
+    assert result["dimensions_inches"]["length"] == 3
+    assert result["barcode"]["status"] == "unavailable"
+    assert result["package_id"] is None
+
+
 def test_camera_focus_mismatch_rejected_and_close_releases_owner(tmp_path):
     from parcel_dimensioner.camera.contracts import CameraError
 
