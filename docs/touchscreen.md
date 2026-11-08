@@ -71,7 +71,12 @@ at startup and locks that position; keep the wall patterns clearly visible.
    Tap **Capture empty station** to act immediately. The app checks both walls and the
    floor edge and zeros the scale. An unavailable scale does not prevent saving
    the image reference; the app explains that weight is unavailable.
-3. Place a box snugly against both walls and take your hands off. Tap **Measure
+3. To read a distant/angled label, hold it closer and facing the camera, then
+   tap **Scan label**. Keep the whole barcode in the center and hold still while
+   it autofocuses. Check the pending ID (choose among multiple codes if needed).
+   The station focus is restored automatically. **Clear label** discards a
+   pending ID; this step is optional.
+   Place that same box snugly against both walls and take your hands off. Tap **Measure
    box**. The app waits for stable weight, captures the image, and checks for
    movement across capture before calculating dimensions. The preview pauses
    during this operation; the live scale status continues updating.
@@ -84,7 +89,10 @@ at startup and locks that position; keep the wall patterns clearly visible.
    **Live scale** is a separate current reading; removing a box does not change
    its saved weight. Tap **Marked result** to inspect the chosen points,
    then **Live view** to return to the camera. Results are saved automatically.
-5. Replace the box and tap **Measure box** again. No new empty image is needed
+5. For the next box, scan its label first, then tap **Measure box** again. A
+   successful scan consumes the pending ID so it cannot carry into the next box.
+   Without a pending label, measurement still attempts decoding in `box.jpg`.
+   No new empty image is needed
    while the station, camera, focus, platform, and lighting stay unchanged.
 6. Use **Zero scale** only with the empty platform. This leaves the camera
    reference intact. Capture a fresh empty reference after a physical or lighting
@@ -98,10 +106,15 @@ at startup and locks that position; keep the wall patterns clearly visible.
    station / Zero scale on the left; Measure box / Marked result on the right.
 
 A failed scan clears the previous dimensions so they cannot be mistaken for
-the new box. Fix the reported problem and retry. If camera startup fails, close
+the new box. A pending label is retained for a retry; Clear label discards it.
+Fix the reported problem and retry. If camera startup fails, close
 other camera applications and reopen Box Scanner. If capture reports changed
 focus, reopen the app and capture a new empty reference. Substantial station
-movement is rejected by the existing measurement command; retake the empty image.
+movement is rejected by the measurement command; retake the empty image.
+Small consistent shifts are aligned before image subtraction, with a warning
+for larger accepted shifts. The check uses fitted wall geometry rather than
+isolated corner jitter. It still rejects independently moving walls that cannot
+be aligned reliably; capturing empty does not correct physical movement later.
 
 Images and results stay on the Pi under
 `data/captures/station-<time>-<id>/`. Each empty capture has its own JPEG and JSON

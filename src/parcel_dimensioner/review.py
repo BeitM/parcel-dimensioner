@@ -67,6 +67,11 @@ def save_scan_review(folder: Path, result: dict):
 
     with Image.open(folder / "review" / "measurement.jpg") as source:
         image = source.convert("RGB")
+    station_image = image
+    separate_label = result.get("barcode_capture", {}).get("mode") == "separate_label"
+    if separate_label:
+        with Image.open(folder / "label.jpg") as source:
+            image = source.convert("RGB")
     width = image.width
     scale = width / 1920
     pen = ImageDraw.Draw(image)
@@ -109,6 +114,25 @@ def save_scan_review(folder: Path, result: dict):
                 (bounds[0] - 4, bounds[1] - 4, bounds[2] + 4, bounds[3] + 4), fill="#101820"
             )
             pen.text((x, y), label, font=body_font, fill=color)
+
+    if separate_label:
+        # Barcode coordinates belong to the close-up, never the station image.
+        image.thumbnail((station_image.width, max(100, station_image.height // 2)))
+        caption_height = max(32, round(50 * scale))
+        combined = Image.new(
+            "RGB",
+            (station_image.width, station_image.height + caption_height + image.height),
+            "#10202c",
+        )
+        combined.paste(station_image, (0, 0))
+        ImageDraw.Draw(combined).text(
+            (12, station_image.height + 4), "Separate label capture", font=body_font, fill="white"
+        )
+        combined.paste(
+            image, ((combined.width - image.width) // 2, station_image.height + caption_height)
+        )
+        image = combined
+        pen = ImageDraw.Draw(image)
 
     def safe_text(text):
         return "".join(c if c.isprintable() else " " for c in str(text))

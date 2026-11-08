@@ -91,3 +91,34 @@ def test_long_manual_id_and_no_barcodes_render_without_overwriting_base(tmp_path
     )
     with image.open(target) as im:
         assert im.width == 480 and im.height > 270
+
+
+def test_separate_label_coordinates_never_drawn_on_station_image(tmp_path):
+    image = pytest.importorskip("PIL.Image")
+    np = pytest.importorskip("numpy")
+    from parcel_dimensioner.review import save_scan_review
+
+    (tmp_path / "review").mkdir()
+    image.new("RGB", (1920, 1080), "#dddddd").save(tmp_path / "review/measurement.jpg")
+    image.new("RGB", (1920, 1080), "#dddddd").save(tmp_path / "label.jpg")
+    result = {
+        "package_id": "CLOSE-42",
+        "barcode_capture": {"mode": "separate_label"},
+        "barcode": {
+            "status": "found",
+            "selected_index": 0,
+            "candidates": [
+                {
+                    "value": "CLOSE-42",
+                    "formats": ["Code 128"],
+                    "positions": [{"points": [[700, 500], [1100, 500], [1100, 650], [700, 650]]}],
+                }
+            ],
+        },
+    }
+    target = save_scan_review(tmp_path, result)
+    with image.open(target) as im:
+        pixels = np.array(im).astype(int)
+    assert abs(pixels[500, 900] - [221, 221, 221]).max() < 5
+    pink = (pixels[1100:, :, 0] > 220) & (pixels[1100:, :, 1] < 130) & (pixels[1100:, :, 2] > 170)
+    assert pink.sum() > 500

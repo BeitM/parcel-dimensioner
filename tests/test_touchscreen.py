@@ -328,6 +328,128 @@ def test_barcode_selection_touch_keyboard_and_clearing_next_scan(tmp_path, monke
     assert not errors, errors
 
 
+def test_pending_label_survives_retry_and_is_consumed_on_success(tmp_path, monkeypatch, request):
+    if isolated_ui_case(request):
+        return
+    tk = pytest.importorskip("tkinter")
+    image = pytest.importorskip("PIL.Image")
+    from parcel_dimensioner import touchscreen
+    from parcel_dimensioner.settings import CameraSettings
+
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("No display for Tk workflow check")
+    root.withdraw()
+    monkeypatch.setattr(tk, "Tk", lambda: root)
+    monkeypatch.setattr(touchscreen, "_vision", lambda: None)
+    marked = tmp_path / "marked.jpg"
+    image.new("RGB", (640, 360), "gray").save(marked)
+    label = {
+        "scan_id": "label-1",
+        "package_id": "LABEL-42",
+        "package_id_source": "barcode",
+        "barcode": {
+            "selected_index": 0,
+            "candidates": [{"value": "LABEL-42", "formats": ["Code 128"]}],
+        },
+    }
+
+    class Worker:
+        def __init__(self, *_):
+            import threading
+
+            self.stopping = threading.Event()
+            self.events, self.frames = queue.Queue(), queue.Queue()
+            self.commands = self
+            self.scans = 0
+
+        def start(self):
+            self.events.put(("ready", str(tmp_path)))
+
+        def is_alive(self):
+            return not self.stopping.is_set()
+
+        def join(self, **_):
+            pass
+
+        def put_nowait(self, action):
+            if action == "empty":
+                self.events.put(("empty", "Ready"))
+            elif action == "label":
+                self.events.put(("label", label))
+            else:
+                self.scans += 1
+                if self.scans == 1:
+                    self.events.put(("error", ("Try again", True)))
+                else:
+                    record = {
+                        **label,
+                        "scan_id": "scan-1",
+                        "dimensions_inches": {"length": 9},
+                        "weight": {"pounds": 5},
+                    }
+                    if self.scans > 2:
+                        record.update(
+                            package_id=None, package_id_source=None, barcode={"status": "not_found"}
+                        )
+                    self.events.put(("result", (record, marked)))
+
+    monkeypatch.setattr(touchscreen, "StationWorker", Worker)
+
+    def descendants(widget):
+        for child in widget.winfo_children():
+            yield child
+            yield from descendants(child)
+
+    def button(text):
+        return next(
+            w for w in descendants(root) if isinstance(w, tk.Button) and w.cget("text") == text
+        )
+
+    def values():
+        return [
+            root.getvar(w.cget("textvariable"))
+            for w in descendants(root)
+            if isinstance(w, tk.Label) and w.cget("textvariable")
+        ]
+
+    errors = []
+
+    def check(stage):
+        try:
+            if stage == 0:
+                button("Capture empty station").invoke()
+            elif stage == 1:
+                button("Scan label").invoke()
+            elif stage == 2:
+                assert "Package ID: LABEL-42" in values()
+                assert any(v.startswith("Next box") for v in values())
+                assert button("Clear label").cget("state") == "normal"
+                button("Measure box").invoke()
+            elif stage == 3:
+                assert "Package ID: LABEL-42" in values()
+                assert "Try again" in " ".join(values())
+                button("Measure box").invoke()
+            elif stage == 4:
+                assert "Package ID: LABEL-42" in values()
+                assert button("Clear label").cget("state") == "disabled"
+                assert not any(v.startswith("Next box") for v in values())
+                button("Measure box").invoke()
+            else:
+                assert "Package ID: —" in values()
+        except Exception as exc:
+            errors.append(exc)
+        if stage == 5:
+            button("Exit").invoke()
+
+    for stage in range(6):
+        root.after(300 + stage * 350, lambda s=stage: check(s))
+    root.after(4500, root.destroy)
+    touchscreen.launch_touchscreen(CameraSettings(), tmp_path, windowed=True)
+    assert not errors, errors
+
+
 @pytest.mark.parametrize("width,height", [(480, 853), (720, 1280), (1000, 680)])
 def test_layout_fallback_and_saved_weight_separate_from_live(
     tmp_path, monkeypatch, width, height, request

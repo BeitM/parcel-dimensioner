@@ -56,7 +56,14 @@ On Windows, install with `python -m pip install -e ".[vision]"`, then use
 1. Find the main group of markers belonging to each wall. Small spare prints
    outside those groups are excluded without fixed screen-coordinate masks.
 2. Detect ChArUco corners on each main board and fit its plane-to-image mapping.
-   Compare common wall corners across images and reject substantial movement.
+   Compare fitted wall geometry at common corners across images. At 1920 pixels
+   wide, consistent shifts up to 6 pixels may be aligned before subtraction;
+   shifts above 3 pixels add a visible warning. Thresholds scale with resolution.
+   A single alignment must match both walls within 2 pixels. Larger shifts or
+   incompatible wall movements still require a new empty image. Original files
+   are unchanged; raw corner shifts, fitted shifts, alignment, and warnings are
+   saved in the result. This compensates small image shifts, not changed station
+   geometry or major camera movement.
 3. Rectify each empty wall view and find the transition from the white lower
    margin to the colored platform. Intersect the two floor lines to locate the
    floor corner. Border widths do not have to match.

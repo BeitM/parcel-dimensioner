@@ -119,6 +119,41 @@ def test_moved_station_is_rejected(tmp_path):
         measure_pair(empty, box)
 
 
+def test_small_station_shift_warns_instead_of_blocking(tmp_path):
+    empty, box = render_station(tmp_path)
+    image = cv.imread(str(box))
+    shifted = cv.warpAffine(image, np.float32([[1, 0, 4], [0, 1, 0]]), image.shape[1::-1])
+    cv.imwrite(str(box), shifted)
+    result, _, _ = measure_pair(empty, box)
+    assert result["station_movement_warnings"]
+    assert max(result["wall_fitted_shift_p95_pixels"].values()) < 6
+    for key, mm in (("length", 230), ("width", 200), ("height", 100)):
+        assert result["dimensions_inches"][key] * 25.4 == pytest.approx(mm, abs=12)
+
+
+def test_independent_wall_shift_cannot_use_global_alignment(tmp_path, monkeypatch):
+    from parcel_dimensioner import measurement
+
+    empty, box = render_station(tmp_path)
+    detect = measurement._detect_wall
+    calls = 0
+
+    def shifted_fit(*args):
+        nonlocal calls
+        wall = detect(*args)
+        calls += 1
+        if calls == 3:  # Occupied long wall only: opposite wall stays fixed.
+            movement = np.array([[1, 0, 5.5], [0, 1, 0], [0, 0, 1]])
+            wall["matrix"] = movement @ wall["matrix"]
+            wall["inverse"] = np.linalg.inv(wall["matrix"])
+            wall["corners"] = {i: np.add(p, [5.5, 0]) for i, p in wall["corners"].items()}
+        return wall
+
+    monkeypatch.setattr(measurement, "_detect_wall", shifted_fit)
+    with pytest.raises(MeasurementError, match="Walls moved differently"):
+        measure_pair(empty, box)
+
+
 def test_wrong_size_and_missing_boards_are_rejected(tmp_path):
     empty, box = render_station(tmp_path)
     cv.imwrite(str(box), np.zeros((100, 100, 3), np.uint8))

@@ -253,7 +253,12 @@ def measure_pair(
     if empty.shape != box.shape:
         raise MeasurementError("Empty and box images must have the same resolution and crop.")
     walls = [_detect_wall(empty, s, square_mm, marker_mm, cv, np) for s in BOARDS]
-    shifts = []
+    shifts, fitted_shifts = [], []
+    movement_warnings = []
+    old_fits, new_fits = [], []
+    # Scale thresholds with capture size; compare fitted geometry to reduce
+    # false alarms from individual ChArUco corner interpolation near the box.
+    pixel_scale = box.shape[1] / 1920
     for wall, spec in zip(walls, BOARDS, strict=True):
         current = _detect_wall(box, spec, square_mm, marker_mm, cv, np)
         common = sorted(wall["corners"].keys() & current["corners"].keys())
@@ -263,9 +268,46 @@ def measure_pair(
             [np.linalg.norm(wall["corners"][i] - current["corners"][i]) for i in common]
         )
         shift = float(np.percentile(distances, 95))
-        if shift > 3:
-            raise MeasurementError("Camera or walls moved; capture a new matching empty image.")
+        old_points = np.array([wall["corners"][i] for i in common])
+        board_points = _project(old_points, wall["inverse"], cv, np)
+        old_fit = _project(board_points, wall["matrix"], cv, np)
+        new_fit = _project(board_points, current["matrix"], cv, np)
+        fitted_shift = float(np.percentile(np.linalg.norm(new_fit - old_fit, axis=1), 95))
+        if fitted_shift > 6 * pixel_scale:
+            raise MeasurementError(
+                f"Camera or {spec.name} wall moved ({fitted_shift:.1f} pixels); "
+                "capture a new matching empty image."
+            )
+        if fitted_shift > 3 * pixel_scale:
+            movement_warnings.append(
+                f"Small {spec.name} wall shift ({fitted_shift:.1f} pixels); "
+                "check marked result and recapture empty if readings look off."
+            )
         shifts.append(shift)
+        fitted_shifts.append(fitted_shift)
+        old_fits.append(old_fit)
+        new_fits.append(new_fit)
+    alignment = None
+    if max(fitted_shifts) > 0.5 * pixel_scale:
+        alignment, inliers = cv.findHomography(
+            np.concatenate(old_fits), np.concatenate(new_fits), cv.RANSAC, 1.5 * pixel_scale
+        )
+        if alignment is None or inliers is None:
+            raise MeasurementError("Cannot align the station; capture a new matching empty image.")
+        residuals = [
+            float(np.percentile(np.linalg.norm(_project(old, alignment, cv, np) - new, axis=1), 95))
+            for old, new in zip(old_fits, new_fits, strict=True)
+        ]
+        if max(residuals) > 2 * pixel_scale:
+            raise MeasurementError("Walls moved differently; capture a new matching empty image.")
+        # Small coherent shifts are compensated before subtracting the empty
+        # image. Merely accepting shifted checkerboards can corrupt the silhouette.
+        empty = cv.warpPerspective(
+            empty, alignment, box.shape[1::-1], borderMode=cv.BORDER_REPLICATE
+        )
+        for wall in walls:
+            wall["matrix"] = alignment @ wall["matrix"]
+            wall["inverse"] = np.linalg.inv(wall["matrix"])
     floor_lines = [_floor_line(empty, w, square_mm, cv, np) for w in walls]
     floor = _intersection(floor_lines[0][0], floor_lines[1][0], np)
     contour, mask = _changed_contour(empty, box, walls, square_mm, cv, np)
@@ -312,6 +354,7 @@ def measure_pair(
         "Assumes a rectangular box flush against both wall planes and a visible platform edge.",
         "Silhouette thresholds can include shadows/reflections or miss low-contrast box edges.",
     ]
+    warnings.extend(movement_warnings)
     if abs(heights[0] - heights[1]) > 6.35:
         warnings.append("Wall height estimates disagree by more than 0.25 inch.")
     dimensions = {
@@ -383,6 +426,11 @@ def measure_pair(
         "box_edges_pixels": review_edges,
         "wall_fit_rms_pixels": {w["spec"].name: w["fit_rms_pixels"] for w in walls},
         "wall_shift_p95_pixels": dict(zip((s.name for s in BOARDS), shifts, strict=True)),
+        "wall_fitted_shift_p95_pixels": dict(
+            zip((s.name for s in BOARDS), fitted_shifts, strict=True)
+        ),
+        "station_movement_warnings": movement_warnings,
+        "reference_alignment": None if alignment is None else alignment.tolist(),
         "warnings": warnings,
     }
     from parcel_dimensioner.review import draw_box_review

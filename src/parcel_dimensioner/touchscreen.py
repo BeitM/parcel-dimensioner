@@ -53,8 +53,16 @@ class StationWorker(threading.Thread):
                             self.events.put(("empty", note))
                         elif command == "zero":
                             session.last_scan = None
+                            session.clear_label()
                             self.scale.zero(self.stopping)
                             self.events.put(("zero", "Scale zeroed. Place a box to measure."))
+                        elif command == "label":
+                            self.events.put(("label", session.scan_label()))
+                        elif command == "clear_label":
+                            session.clear_label()
+                            self.events.put(("label", None))
+                        elif command == "label_id":
+                            self.events.put(("label", session.set_label_id(**reason)))
                         elif command == "package_id":
                             result = session.set_package_id(**reason)
                             self.review_warning = session.review_warning
@@ -67,7 +75,13 @@ class StationWorker(threading.Thread):
                         event = "zero_error" if command == "zero" else "weight_error"
                         self.events.put((event, (str(exc), session.reference is not None)))
                     except Exception as exc:
-                        event = "package_id_error" if command == "package_id" else "error"
+                        event = (
+                            "package_id_error"
+                            if command in ("package_id", "label_id")
+                            else "label_error"
+                            if command == "label"
+                            else "error"
+                        )
                         self.events.put((event, (str(exc), session.reference is not None)))
                 if self.stopping.is_set():
                     break
@@ -119,6 +133,7 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
         "fallback": None,
         "result": None,
         "editing": False,
+        "pending_label": None,
     }
     portrait = root.winfo_screenheight() > root.winfo_screenwidth()
     font = 16 if portrait else 14
@@ -153,7 +168,7 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
     package_frame.pack(fill="x", padx=15, pady=3)
     package_frame.columnconfigure(0, weight=1)
     package_value = tk.StringVar(value="Package ID: —")
-    package_status = tk.StringVar(value="Measure a box to read its barcode.")
+    package_status = tk.StringVar(value="Hold label close, tap Scan label, then measure.")
     package_label = tk.Label(
         package_frame,
         textvariable=package_value,
@@ -219,7 +234,7 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
         update_package()
 
     def update_package():
-        result = state["result"] or {}
+        result = state["pending_label"] or state["result"] or {}
         value = result.get("package_id")
         package_value.set("Package ID: " + (display_text(value, 44) if value else "—"))
         barcode = result.get("barcode", {})
@@ -240,7 +255,9 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
         elif result:
             message = "Barcode unavailable • enter an ID"
         else:
-            message = "Measure a box to read its barcode."
+            message = "Hold label close, tap Scan label, then measure."
+        if state["pending_label"]:
+            message = "Next box • " + message
         package_status.set(message)
         barcode_label.configure(fg="#71dcc4" if value else "#ffca78")
         id_button.configure(text="Edit ID" if value else "Choose ID" if candidates else "Enter ID")
@@ -251,10 +268,20 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
         )
         empty_button.configure(state="normal" if idle else "disabled")
         zero_button.configure(state="normal" if idle else "disabled")
-        scan_button.configure(state="normal" if idle and state["empty"] else "disabled")
+        label_ready = not state["pending_label"] or bool(state["pending_label"].get("package_id"))
+        scan_button.configure(
+            state="normal" if idle and state["empty"] and label_ready else "disabled"
+        )
         review_button.configure(state="normal" if idle and state["review"] else "disabled")
-        fallback_button.configure(state="normal" if idle and state["empty"] else "disabled")
-        editable = idle and state["result"] and state["result"].get("scan_id")
+        fallback_button.configure(
+            state="normal" if idle and state["empty"] and label_ready else "disabled"
+        )
+        label_button.configure(state="normal" if idle else "disabled")
+        clear_label_button.configure(
+            state="normal" if idle and state["pending_label"] else "disabled"
+        )
+        target = state["pending_label"] or state["result"]
+        editable = idle and target and target.get("scan_id")
         id_button.configure(state="normal" if editable else "disabled")
 
     def submit(action):
@@ -262,6 +289,8 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
             return
         if action == "empty":
             state["empty"] = False
+        if action in ("empty", "zero", "label", "clear_label"):
+            state["pending_label"] = None
         reason = state["fallback"] if action == "dimensions_only" else None
         if action == "dimensions_only" and reason is None:
             return
@@ -274,6 +303,8 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
                 "zero": "Keep hands off — zeroing scale…",
                 "scan": "Waiting for stable weight, then capturing…",
                 "dimensions_only": "Capturing dimensions only — weight will be unavailable.",
+                "label": "Hold label still in the center — focusing and reading barcode…",
+                "clear_label": "Clearing pending label…",
             }[action]
         )
         enable_buttons()
@@ -284,9 +315,12 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
         review_button.configure(text="Live view" if state["show_review"] else "Marked result")
 
     def edit_package():
-        if state["busy"] or state["editing"] or state["closing"] or not state["result"]:
+        if state["busy"] or state["editing"] or state["closing"]:
             return
-        result = state["result"]
+        result = state["pending_label"] or state["result"]
+        if not result:
+            return
+        editing_label = state["pending_label"] is not None
         state["editing"] = True
         enable_buttons()
 
@@ -300,7 +334,7 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
             status.set("Saving package ID…")
             worker.commands.put_nowait(
                 (
-                    "package_id",
+                    "label_id" if editing_label else "package_id",
                     {
                         "scan_id": result["scan_id"],
                         "value": value,
@@ -323,6 +357,33 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
         takefocus=False,
     )
     id_button.grid(row=0, column=1, rowspan=2, padx=(8, 0), sticky="e")
+
+    label_actions = tk.Frame(package_frame, bg="#10202c")
+    label_actions.grid(row=2, column=0, columnspan=2, pady=(4, 0))
+    label_button = tk.Button(
+        label_actions,
+        text="Scan label",
+        command=lambda: submit("label"),
+        font=("Sans", 12, "bold"),
+        bg="#007b70",
+        fg="white",
+        height=2,
+        width=14,
+        takefocus=False,
+    )
+    label_button.pack(side="left", padx=4)
+    clear_label_button = tk.Button(
+        label_actions,
+        text="Clear label",
+        command=lambda: submit("clear_label"),
+        font=("Sans", 12, "bold"),
+        bg="#345269",
+        fg="white",
+        height=2,
+        width=14,
+        takefocus=False,
+    )
+    clear_label_button.pack(side="left", padx=4)
 
     def close():
         if state["closing"]:
@@ -406,6 +467,7 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
                     )
                 elif event == "result":
                     result, path = payload
+                    state["pending_label"] = None
                     state["result"] = result
                     update_package()
                     with Image.open(path) as im:
@@ -424,11 +486,34 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
                     if abs(heights.get("long", 0) - heights.get("short", 0)) > 0.25:
                         note += " Wall heights disagree; inspect marked result."
                     warning = getattr(worker, "review_warning", "")
+                    movement = " ".join(result.get("station_movement_warnings", []))
+                    if movement:
+                        note += " " + movement
                     status.set(
                         note + " " + warning
                         if warning
                         else note + " Replace the box and tap Measure box."
                     )
+                elif event == "label":
+                    state.update(busy=False, pending_label=payload)
+                    update_package()
+                    if payload and payload.get("package_id"):
+                        status.set(
+                            "Label ready. Place this box in the corner, hands off, "
+                            "then tap Measure box."
+                        )
+                    elif payload:
+                        status.set(
+                            "Choose or enter an ID, rescan the label, or tap Clear label to skip."
+                        )
+                    else:
+                        status.set(
+                            "Pending label cleared. Scan another label or measure without one."
+                        )
+                elif event == "label_error":
+                    state.update(busy=False, pending_label=None)
+                    update_package()
+                    status.set("Could not read label: " + payload[0])
                 elif event == "package_id":
                     result, path = payload
                     state.update(busy=False, result=result)

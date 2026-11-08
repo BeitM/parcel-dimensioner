@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import shutil
 import time
 from contextlib import suppress
 from dataclasses import asdict
@@ -78,6 +79,29 @@ class StationCamera:
             raise CameraError("Focus changed. Reopen the app and capture the empty station again.")
         return metadata
 
+    def capture_label(self, path):
+        """Focus on a close label, then restore the station optics even on failure."""
+        try:
+            if not self.camera.autofocus_cycle():
+                raise CameraError(
+                    "Label focus failed. Hold the label still, a little farther away."
+                )
+            return _plain_metadata(self.camera.capture_file(str(path)) or {})
+        finally:
+            _set_manual_focus(self.camera, self.position)
+            # Drain requests until the restored lens position is reported in three frames.
+            settled = 0
+            for _ in range(30):
+                reported = self.camera.capture_metadata().get("LensPosition")
+                matches = isinstance(reported, (int, float)) and math.isclose(
+                    reported, self.position, abs_tol=0.05
+                )
+                settled = settled + 1 if matches else 0
+                if settled >= 3:
+                    break
+            else:
+                raise CameraError("Station focus could not be restored. Reopen the app.")
+
     def close(self):
         if self.camera is not None:
             self.camera.close()
@@ -129,9 +153,10 @@ class ScanSession:
         self.reviewer = reviewer
         self.review_path = None
         self.review_warning = ""
+        self.pending_label = None
 
-    def _capture(self, path):
-        metadata = self.camera.capture(path)
+    def _capture(self, path, *, label=False):
+        metadata = self.camera.capture_label(path) if label else self.camera.capture(path)
         record = {
             "captured_at": datetime.now(UTC).isoformat(),
             "camera_settings": asdict(self.settings),
@@ -142,6 +167,7 @@ class ScanSession:
 
     def capture_empty(self):
         self.last_scan = None
+        self.clear_label()
         self.reference = self.reference_metadata = None
         path = self.directory / f"empty-{uuid4().hex[:8]}.jpg"
         metadata = self._capture(path)
@@ -149,10 +175,55 @@ class ScanSession:
         self.reference, self.reference_metadata = path, metadata
         return path
 
+    def clear_label(self):
+        self.pending_label = None
+
+    def scan_label(self):
+        self.last_scan = None
+        self.clear_label()
+        folder = self.directory / f"label-{uuid4().hex}"
+        folder.mkdir(exist_ok=False)
+        path = folder / "label.jpg"
+        try:
+            self._capture(path, label=True)
+            # A close-up has no station silhouette. Limit decoding to the guide area.
+            from PIL import Image
+
+            with Image.open(path) as image:
+                width, height = image.size
+            outline = [
+                [width * x, height * y] for x, y in ((0.1, 0.1), (0.9, 0.1), (0.9, 0.9), (0.1, 0.9))
+            ]
+            barcode = self.decoder(path, outline=outline)
+            barcode = {**barcode, "region": "label_guide"}
+            result = {
+                "scan_id": folder.name,
+                "barcode": barcode,
+                **initial_identity(barcode),
+            }
+            self._save_result(folder, result)
+            self.pending_label = folder, result
+            return result
+        except Exception as exc:
+            (folder / "error.txt").write_text(str(exc), encoding="utf-8")
+            raise
+
+    def set_label_id(self, scan_id, value, candidate_index=None):
+        if self.pending_label is None or self.pending_label[1]["scan_id"] != scan_id:
+            raise PackageIdError("This label is no longer current. Scan the label again.")
+        folder, original = self.pending_label
+        result = with_identity(original, value, candidate_index)
+        self._save_result(folder, result)
+        self.pending_label = folder, result
+        return result
+
     def scan(self, *, dimensions_only_reason=None):
         self.last_scan = None
         if self.reference is None:
             raise MeasurementError("Capture the empty station first.")
+        pending = self.pending_label
+        if pending is not None and not pending[1].get("package_id"):
+            raise PackageIdError("Choose or enter the label ID first, or clear the pending label.")
         self.counter += 1
         folder = self.directory / f"scan-{self.counter:04}"
         folder.mkdir(exist_ok=False)
@@ -175,18 +246,37 @@ class ScanSession:
                 self.reference = None
                 raise MeasurementError("Camera crop changed. Capture a new empty station.")
             result = self.measure(self.reference, path, folder / "review")
-            barcode = self.decoder(path, outline=result.get("box_contour_pixels", []))
+            if pending is None:
+                barcode = self.decoder(path, outline=result.get("box_contour_pixels", []))
+                identity = initial_identity(barcode)
+                barcode_capture = {"mode": "measurement", "image": "box.jpg"}
+            else:
+                label_folder, label_result = pending
+                barcode = label_result["barcode"]
+                identity = {
+                    key: label_result[key]
+                    for key in ("package_id", "package_id_source", "package_id_history")
+                }
+                for name in ("label.jpg", "label.json"):
+                    shutil.copyfile(label_folder / name, folder / name)
+                barcode_capture = {
+                    "mode": "separate_label",
+                    "image": "label.jpg",
+                    "label_id": label_result["scan_id"],
+                }
             result = {
                 **result,
                 "scan_id": uuid4().hex,
                 "weight": weight,
                 "scan_mode": "dimensions_and_weight" if ticket else "dimensions_only",
                 "barcode": barcode,
-                **initial_identity(barcode),
+                "barcode_capture": barcode_capture,
+                **identity,
             }
             self._save_result(folder, result)
             self.last_scan = folder, result
             self._update_review(folder, result)
+            self.clear_label()
             return result, self.review_path
         except Exception as exc:
             (folder / "error.txt").write_text(str(exc), encoding="utf-8")
