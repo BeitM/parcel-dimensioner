@@ -7,10 +7,12 @@ height, reads its barcode, records stable weight, and saves a reviewable result.
 The laptop is the development machine; the Pi runs the hardware. GitHub transfers
 code, SSH provides command access, and Pi Connect shares the desktop.
 
-Confirmed by the operator: SSH and the live camera preview work. The camera
-capture CLI is implemented, but saved-image quality still needs to be checked.
-ChArUco patterns on foam boards have arrived. Calibration, measurement, barcode,
-scale integration, result storage, and the operator UI are not implemented yet.
+Current implementation (2026-11-07): camera capture, experimental fixed-wall
+dimensions, a touchscreen UI, Pico/HX711 weighing, and combined local result
+storage are implemented. The new weighing/app integration still needs on-Pi
+validation; the prior raw scale tests worked with 5 lb and 10 lb reference loads.
+Lens calibration, barcode, and company-system delivery remain future work.
+See [touchscreen operation](touchscreen.md) and [scale setup](scale.md).
 
 Earlier project chats have now been reviewed; see [project-context.md](project-context.md).
 The latest planning scope is 24 x 18 x 18-inch rectangular parcels, superseding

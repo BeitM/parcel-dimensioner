@@ -1,12 +1,12 @@
 # Box Scanner touchscreen app
 
 The Pi can run a local fullscreen app with a live camera view, large touch
-buttons, and dimensions shown in inches. No browser, network server, or company
+buttons, dimensions in inches, and weight in pounds. No browser, network server, or company
 API is needed. The desktop launcher opens this app; it does not start on boot.
 
 ## Transfer the changes from the laptop
 
-Commit the touchscreen changes on the laptop first, if they are not already
+Commit the app and Pico firmware changes on the laptop first, if they are not already
 committed. Then run this in **Windows PowerShell on the laptop** to upload the
 commit to GitHub and connect to the Pi:
 
@@ -29,10 +29,15 @@ Run these in the **Pi shell**, either over SSH or in a Pi desktop terminal:
 cd ~/parcel-dimensioner
 git pull --ff-only
 sudo apt update
-sudo apt install -y python3-tk python3-picamera2
+sudo apt install -y python3-tk python3-pil.imagetk python3-picamera2
 .venv/bin/python -m pip install -e '.[touchscreen]'
 .venv/bin/parcel-dimensioner desktop-install --lens-position 1.018378
 ```
+
+For weighing, also follow the **one-time Pico program installation** in
+[the scale setup guide](scale.md). The temporary raw-count test previously run
+with `mpremote run` does not install that startup program. Stop any running
+terminal scale test before opening the app; one program owns the USB port.
 
 If the pull fails because of local changes, stop and inspect those changes;
 do not discard them to force the update. After installation, use the Pi desktop
@@ -61,16 +66,30 @@ at startup and locks that position; keep the wall patterns clearly visible.
 ## Daily operation
 
 1. Close any other camera preview/capture apps, then open **Box Scanner**.
-2. Clear the platform. Tap **Capture empty station**, then confirm that the
-   platform is empty. The app checks that it can see both walls and the floor edge.
-3. Place a box snugly against both walls. Tap **Measure box** and hold it still
-   while the app captures and calculates. The preview pauses during calculation.
-4. Read **L, W, H** in inches. Tap **Marked result** to inspect the chosen points,
+2. Clear the platform, keeping the wooden deck and attached walls installed.
+   Tap **Capture empty station**, then confirm. The app checks both walls and the
+   floor edge and zeros the scale. An unavailable scale does not prevent saving
+   the image reference; the app explains that weight is unavailable.
+3. Place a box snugly against both walls and take your hands off. Tap **Measure
+   box**. The app waits for stable weight, captures the image, and checks for
+   movement across capture before calculating dimensions. The preview pauses
+   during this operation; the live scale status continues updating.
+4. Read **Length, Width, Height** in inches and **Saved weight** in pounds.
+   **Live scale** is a separate current reading; removing a box does not change
+   its saved weight. Tap **Marked result** to inspect the chosen points,
    then **Live view** to return to the camera. Results are saved automatically.
 5. Replace the box and tap **Measure box** again. No new empty image is needed
    while the station, camera, focus, platform, and lighting stay unchanged.
-6. Capture a fresh empty reference after a physical or lighting change. Every
-   restart also requires a fresh reference. Tap **Exit** to release the camera.
+6. Use **Zero scale** only with the empty platform. This leaves the camera
+   reference intact. Capture a fresh empty reference after a physical or lighting
+   change. Every restart requires a fresh reference and explicit scale zero.
+   USB reconnects also require another zero. The calibration factor persists.
+7. If weight cannot be obtained, retry with **Measure box**, or explicitly tap
+   **Measure dimensions only**. That takes a new image and saves weight as
+   unavailable with the reason. There is no silent fallback or reused old weight.
+8. Tap the square **Exit** button in the preview's upper-right to close both
+   camera and scale. The taller main buttons form two columns: Capture empty
+   station / Zero scale on the left; Measure box / Marked result on the right.
 
 A failed scan clears the previous dimensions so they cannot be mistaken for
 the new box. Fix the reported problem and retry. If camera startup fails, close
@@ -82,23 +101,31 @@ Images and results stay on the Pi under
 `data/captures/station-<time>-<id>/`. Each empty capture has its own JPEG and JSON
 metadata. Each scan gets a numbered folder with `box.jpg`, capture metadata,
 `review/result.json`, `review/measurement.jpg`, and `review/change-mask.png`.
-Failed attempts retain their images and an `error.txt`. Existing images are not
+The scan's **top-level `result.json`** contains dimensions AND weight (or the
+explicit missing-weight reason); the review JSON is the vision-only report.
+Failed attempts retain an `error.txt` and `attempt.json`, plus any images already
+captured. A failure before capture has no box image. Existing images are not
 overwritten. These runtime files are ignored by Git.
 
 The application owns one camera for preview and all captures, with unchanged
 resolution and locked focus throughout the session. Camera and measurement work
-run on one background worker; Tk widgets are updated only on the UI thread.
+run on one background worker; a separate USB reader continuously acquires scale
+samples. Tk widgets are updated only on the UI thread.
 There is no automatic detection of when a box has been placed or removed: each
 scan is explicitly triggered by a tap. Review results before using them elsewhere.
 
 ## Current limits
 
 This app automates the existing **experimental** measurement method; it does not
-improve its accuracy or add lens calibration, barcode, weighing, or webhook
+improve dimension accuracy or add lens calibration, barcode, or webhook
 delivery. It uses the current project's wall layouts and nominal 1.5-inch square
 spacing. The empty station must actually be empty; the confirmation and wall
 checks cannot prove that all objects have been removed.
 
-The initial laptop tests exercise the workflow with simulated camera data and
-the real Tk event loop. The Raspberry Pi camera, touchscreen performance, and
-desktop shortcut need an on-device smoke test before regular use.
+Weight uses the station's initial 5 lb / 10 lb calibration. The known corner
+spread (about 0.21 lb under the 10 lb test) is not corrected by this integration.
+See [scale setup and validation](scale.md) for configuration and checks.
+
+Laptop tests exercise the workflow with simulated camera/scale data and the
+real Tk event loop, including portrait layouts. Raspberry Pi camera, Pico USB
+timing, and touchscreen behavior still need an on-device smoke test.

@@ -106,7 +106,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "touchscreen":
             from parcel_dimensioner.touchscreen import launch_touchscreen
 
-            launch_touchscreen(camera_settings, settings.captures_dir, windowed=args.windowed)
+            launch_touchscreen(
+                camera_settings,
+                settings.captures_dir,
+                scale_settings=settings.scale,
+                windowed=args.windowed,
+            )
             return 0
         backend = Picamera2Backend(camera_settings.index, camera_settings.lens_position)
 

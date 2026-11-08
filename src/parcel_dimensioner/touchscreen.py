@@ -1,4 +1,4 @@
-"""Local touchscreen app: camera/vision on one worker, Tk only on the UI thread."""
+"""Touchscreen scanner: separate camera/vision and continuous USB scale workers."""
 
 from __future__ import annotations
 
@@ -9,23 +9,29 @@ from pathlib import Path
 
 from parcel_dimensioner.camera.contracts import CameraError
 from parcel_dimensioner.measurement import _vision
+from parcel_dimensioner.scale import ScaleError, SerialScale
+from parcel_dimensioner.settings import ScaleSettings
 from parcel_dimensioner.station import ScanSession, StationCamera
 
 
 class StationWorker(threading.Thread):
-    def __init__(self, settings, captures_dir):
+    def __init__(self, settings, captures_dir, scale_settings=None):
         super().__init__(daemon=True)
         self.settings, self.captures_dir = settings, captures_dir
         self.commands = queue.Queue(maxsize=1)
         self.events = queue.Queue()
         self.frames = queue.Queue(maxsize=1)
         self.stopping = threading.Event()
+        self.scale = SerialScale(scale_settings)
 
     def run(self):
         camera = StationCamera(self.settings)
         try:
+            self.scale.start()
             camera.start()
-            session = ScanSession(self.captures_dir, camera, self.settings)
+            session = ScanSession(
+                self.captures_dir, camera, self.settings, scale=self.scale, cancel=self.stopping
+            )
             self.events.put(("ready", str(session.directory)))
             while not self.stopping.is_set():
                 try:
@@ -33,12 +39,24 @@ class StationWorker(threading.Thread):
                 except queue.Empty:
                     action = None
                 if action:
+                    command, reason = action if isinstance(action, tuple) else (action, None)
                     try:
-                        if action == "empty":
+                        if command == "empty":
                             session.capture_empty()
-                            self.events.put(("empty", None))
+                            try:
+                                self.scale.zero(self.stopping)
+                                note = "Empty reference captured and scale zeroed."
+                            except ScaleError as exc:
+                                note = f"Empty reference captured. Scale: {exc}"
+                            self.events.put(("empty", note))
+                        elif command == "zero":
+                            self.scale.zero(self.stopping)
+                            self.events.put(("zero", "Scale zeroed. Place a box to measure."))
                         else:
-                            self.events.put(("result", session.scan()))
+                            self.events.put(("result", session.scan(dimensions_only_reason=reason)))
+                    except ScaleError as exc:
+                        event = "zero_error" if command == "zero" else "weight_error"
+                        self.events.put((event, (str(exc), session.reference is not None)))
                     except Exception as exc:
                         self.events.put(("error", (str(exc), session.reference is not None)))
                 if self.stopping.is_set():
@@ -54,10 +72,11 @@ class StationWorker(threading.Thread):
             try:
                 camera.close()
             finally:
+                self.scale.close()
                 self.events.put(("closed", None))
 
 
-def launch_touchscreen(settings, captures_dir: Path, *, windowed=False):
+def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, windowed=False):
     try:
         import tkinter as tk
         from tkinter import messagebox
@@ -65,7 +84,8 @@ def launch_touchscreen(settings, captures_dir: Path, *, windowed=False):
         from PIL import Image, ImageTk
     except ImportError as exc:
         raise CameraError(
-            "Install python3-tk with apt and install this project's [touchscreen] extra."
+            "Install python3-tk and python3-pil.imagetk with apt, "
+            "then install this project's [touchscreen] extra."
         ) from exc
     _vision()
     try:
@@ -78,7 +98,7 @@ def launch_touchscreen(settings, captures_dir: Path, *, windowed=False):
     root.geometry("1000x680")
     root.attributes("-fullscreen", not windowed)
     root.configure(bg="#10202c")
-    worker = StationWorker(settings, captures_dir)
+    worker = StationWorker(settings, captures_dir, scale_settings or ScaleSettings())
     state = {
         "ready": False,
         "empty": False,
@@ -87,28 +107,47 @@ def launch_touchscreen(settings, captures_dir: Path, *, windowed=False):
         "review": None,
         "show_review": False,
         "photo": None,
+        "fallback": None,
     }
     portrait = root.winfo_screenheight() > root.winfo_screenwidth()
     font = 16 if portrait else 14
-    tk.Label(root, text="BOX SCANNER", bg="#10202c", fg="white", font=("Sans", 23, "bold")).pack(
-        pady=(12, 2)
-    )
-    tk.Label(
+
+    # The preview is the first content on screen. Exit overlays its upper-right corner.
+    preview_frame = tk.Frame(root, bg="#08131b", height=80)
+    preview_frame.pack_propagate(False)
+    preview_frame.pack(side="top", fill="both", expand=True, padx=8, pady=(8, 4))
+    preview = tk.Label(preview_frame, bg="#08131b")
+    preview.pack(fill="both", expand=True)
+
+    results = tk.Frame(root, bg="#10202c")
+    results.pack(fill="x", padx=12, pady=2)
+    values = {}
+    for index, (key, label) in enumerate(
+        [("length", "Length"), ("width", "Width"), ("height", "Height"), ("weight", "Saved weight")]
+    ):
+        row, column = divmod(index, 2)
+        card = tk.Frame(results, bg="#193442")
+        card.grid(row=row, column=column, sticky="nsew", padx=3, pady=3)
+        results.columnconfigure(column, weight=1, uniform="measurements")
+        tk.Label(card, text=label, bg="#193442", fg="#c3d6e2", font=("Sans", 11)).pack()
+        values[key] = tk.StringVar(value="—")
+        tk.Label(
+            card,
+            textvariable=values[key],
+            bg="#193442",
+            fg="white",
+            font=("Sans", 22 if portrait else 19, "bold"),
+        ).pack(pady=(0, 3))
+    live_weight = tk.StringVar(value="Live scale: connecting…")
+    live_label = tk.Label(
         root,
-        text="Experimental dimensions • inches",
+        textvariable=live_weight,
         bg="#10202c",
-        fg="#ffca78",
+        fg="#c3d6e2",
         font=("Sans", font),
-    ).pack()
-    dimensions = tk.StringVar(value="Length —    Width —    Height —")
-    tk.Label(
-        root,
-        textvariable=dimensions,
-        bg="#10202c",
-        fg="white",
-        font=("Sans", 23 if portrait else 21, "bold"),
-        pady=10,
-    ).pack()
+        wraplength=600,
+    )
+    live_label.pack(fill="x", padx=12, pady=3)
     status = tk.StringVar(value="Starting camera…")
     status_label = tk.Label(
         root,
@@ -116,41 +155,61 @@ def launch_touchscreen(settings, captures_dir: Path, *, windowed=False):
         bg="#10202c",
         fg="#c3d6e2",
         font=("Sans", font),
-        wraplength=650,
+        wraplength=600,
         justify="center",
     )
-    status_label.pack(fill="x", padx=18)
+    status_label.pack(fill="x", padx=12, pady=3)
     controls = tk.Frame(root, bg="#10202c")
-    controls.pack(side="bottom", fill="x", padx=14, pady=10)
-    preview = tk.Label(root, bg="#08131b")
-    preview.pack(fill="both", expand=True, padx=14, pady=8)
-    preview.bind("<Configure>", lambda e: status_label.configure(wraplength=max(200, e.width)))
+    controls.pack(padx=8, pady=(4, 8))
+
+    def resize(event):
+        width = max(180, event.width - 24)
+        status_label.configure(wraplength=width)
+        live_label.configure(wraplength=width)
+        for control in (empty_button, zero_button, scan_button, review_button):
+            control.configure(wraplength=max(100, min(210, width // 2 - 24)))
+
+    root.bind("<Configure>", lambda event: resize(event) if event.widget is root else None)
+
+    def clear_result():
+        for value in values.values():
+            value.set("—")
+        state.update(review=None, show_review=False)
+        review_button.configure(text="Marked result")
 
     def enable_buttons():
         idle = state["ready"] and not state["busy"] and not state["closing"]
         empty_button.configure(state="normal" if idle else "disabled")
+        zero_button.configure(state="normal" if idle else "disabled")
         scan_button.configure(state="normal" if idle and state["empty"] else "disabled")
         review_button.configure(state="normal" if idle and state["review"] else "disabled")
+        fallback_button.configure(state="normal" if idle and state["empty"] else "disabled")
 
     def submit(action):
         if state["busy"] or not state["ready"] or state["closing"]:
             return
-        if action == "empty":
-            if not messagebox.askokcancel(
-                "Empty station", "Remove every box from the platform, then tap OK.", parent=root
-            ):
+        if action in ("empty", "zero"):
+            prompt = "Remove every box. Leave the platform and walls installed, then tap OK."
+            if not messagebox.askokcancel("Empty platform", prompt, parent=root):
                 return
+        if action == "empty":
             state["empty"] = False
-        state.update(busy=True, review=None, show_review=False)
-        dimensions.set("Length —    Width —    Height —")
-        review_button.configure(text="Marked result")
+        reason = state["fallback"] if action == "dimensions_only" else None
+        if action == "dimensions_only" and reason is None:
+            return
+        state.update(busy=True, fallback=None)
+        fallback_button.pack_forget()
+        clear_result()
         status.set(
-            "Hold still — capturing empty station…"
-            if action == "empty"
-            else "Hold still — capturing and measuring…"
+            {
+                "empty": "Capturing empty station and zeroing scale…",
+                "zero": "Keep hands off — zeroing scale…",
+                "scan": "Waiting for stable weight, then capturing…",
+                "dimensions_only": "Capturing dimensions only — weight will be unavailable.",
+            }[action]
         )
         enable_buttons()
-        worker.commands.put_nowait(action)
+        worker.commands.put_nowait(("scan", reason) if action == "dimensions_only" else action)
 
     def toggle_review():
         state["show_review"] = not state["show_review"]
@@ -161,7 +220,7 @@ def launch_touchscreen(settings, captures_dir: Path, *, windowed=False):
             return
         state["closing"] = True
         worker.stopping.set()
-        status.set("Closing camera…")
+        status.set("Closing camera and scale…")
         enable_buttons()
 
     def button(text, command, color):
@@ -174,18 +233,46 @@ def launch_touchscreen(settings, captures_dir: Path, *, windowed=False):
             fg="white",
             disabledforeground="#a0acb4",
             relief="flat",
-            pady=14,
+            width=16,
+            height=3,
+            padx=4,
+            pady=8,
+            wraplength=180,
             takefocus=False,
         )
 
     empty_button = button("Capture empty station", lambda: submit("empty"), "#345269")
+    zero_button = button("Zero scale", lambda: submit("zero"), "#345269")
     scan_button = button("Measure box", lambda: submit("scan"), "#007b70")
     review_button = button("Marked result", toggle_review, "#345269")
-    exit_button = button("Exit", close, "#543f4a")
-    for index, control in enumerate([empty_button, scan_button, review_button, exit_button]):
-        row, column = (index, 0) if portrait else divmod(index, 2)
-        control.grid(row=row, column=column, sticky="ew", padx=4, pady=4)
-        controls.columnconfigure(column, weight=1)
+    for control, row, column in (
+        (empty_button, 0, 0),
+        (zero_button, 1, 0),
+        (scan_button, 0, 1),
+        (review_button, 1, 1),
+    ):
+        control.grid(row=row, column=column, padx=5, pady=4, sticky="nsew")
+    fallback_button = tk.Button(
+        root,
+        text="Measure dimensions only",
+        command=lambda: submit("dimensions_only"),
+        font=("Sans", font, "bold"),
+        bg="#805623",
+        fg="white",
+        pady=8,
+        takefocus=False,
+    )
+    exit_button = tk.Button(
+        preview_frame,
+        text="Exit",
+        command=close,
+        font=("Sans", 11, "bold"),
+        bg="#543f4a",
+        fg="white",
+        relief="flat",
+        takefocus=False,
+    )
+    exit_button.place(relx=1, x=-8, y=8, anchor="ne", width=56, height=56)
     root.protocol("WM_DELETE_WINDOW", close)
     root.bind("<Escape>", lambda _: close())
     enable_buttons()
@@ -201,36 +288,43 @@ def launch_touchscreen(settings, captures_dir: Path, *, windowed=False):
                 elif event == "empty":
                     state.update(empty=True, busy=False)
                     status.set(
-                        "Ready. Place a box snugly against both walls, then tap Measure box."
+                        (payload or "Empty reference captured.") + " Place a box to measure."
+                    )
+                elif event == "zero":
+                    state["busy"] = False
+                    status.set(
+                        payload if state["empty"] else "Scale zeroed. Capture empty station next."
                     )
                 elif event == "result":
                     result, path = payload
                     with Image.open(path) as im:
                         state["review"] = im.copy()
                     state["busy"] = False
-                    d = result["dimensions_inches"]
-                    dimensions.set(
-                        f"L {d['length']:.2f}″    W {d['width']:.2f}″    H {d['height']:.2f}″"
-                    )
-                    status.set(
-                        "Saved. Replace the box and tap Measure box again. "
-                        + (
-                            "Wall heights disagree; inspect marked result."
-                            if abs(
-                                result["height_by_wall_inches"]["long"]
-                                - result["height_by_wall_inches"]["short"]
-                            )
-                            > 0.25
-                            else ""
-                        )
-                    )
-                elif event == "error":
+                    for key, value in result["dimensions_inches"].items():
+                        values[key].set(f"{value:.2f}″")
+                    weight = result.get("weight", {})
+                    if weight.get("pounds") is not None:
+                        values["weight"].set(f"{weight['pounds']:.2f} lb")
+                        note = "Dimensions and weight saved."
+                    else:
+                        values["weight"].set("—")
+                        note = "Dimensions-only result saved; weight unavailable."
+                    heights = result.get("height_by_wall_inches", {})
+                    if abs(heights.get("long", 0) - heights.get("short", 0)) > 0.25:
+                        note += " Wall heights disagree; inspect marked result."
+                    status.set(note + " Replace the box and tap Measure box.")
+                elif event in ("error", "weight_error", "zero_error"):
                     message, has_reference = payload
-                    state.update(busy=False, empty=has_reference, review=None)
-                    status.set("Could not measure: " + message)
+                    state.update(busy=False, empty=has_reference)
+                    clear_result()
+                    status.set(("Scale: " if event != "error" else "Could not measure: ") + message)
+                    if event == "weight_error" and has_reference:
+                        state["fallback"] = message
+                        status.set(message + " Retry with Measure box, or choose dimensions only.")
+                        fallback_button.pack(before=controls, pady=3)
                 elif event == "fatal":
-                    state.update(ready=False, busy=False, review=None)
-                    dimensions.set("Length —    Width —    Height —")
+                    state.update(ready=False, busy=False)
+                    clear_result()
                     status.set(
                         "Camera stopped: " + payload + " Close other camera apps and reopen."
                     )
@@ -243,6 +337,13 @@ def launch_touchscreen(settings, captures_dir: Path, *, windowed=False):
         if state["closing"] and not worker.is_alive():
             root.destroy()
             return
+        scale = getattr(worker, "scale", None)
+        if scale is not None:
+            reading = scale.snapshot()
+            weight = reading["pounds"]
+            text = "—" if weight is None else f"{0 if abs(weight) < 0.005 else weight:.2f} lb"
+            live_weight.set(f"Live scale: {text} • {reading['message']}")
+            live_label.configure(fg="#71dcc4" if reading["stable"] else "#ffca78")
         try:
             frame = worker.frames.get_nowait()
         except queue.Empty:
@@ -250,7 +351,9 @@ def launch_touchscreen(settings, captures_dir: Path, *, windowed=False):
         image = state["review"] if state["show_review"] else frame
         if image is not None:
             image = image.copy()
-            image.thumbnail((max(10, preview.winfo_width()), max(10, preview.winfo_height())))
+            image.thumbnail(
+                (max(10, preview_frame.winfo_width()), max(10, preview_frame.winfo_height()))
+            )
             state["photo"] = ImageTk.PhotoImage(image)
             preview.configure(image=state["photo"])
         root.after(100, poll)
@@ -260,4 +363,4 @@ def launch_touchscreen(settings, captures_dir: Path, *, windowed=False):
         root.mainloop()
     finally:
         worker.stopping.set()
-        worker.join(timeout=3)
+        worker.join(timeout=4)

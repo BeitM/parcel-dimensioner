@@ -96,6 +96,8 @@ class ScanSession:
         settings: CameraSettings,
         validator=validate_reference,
         measure=None,
+        scale=None,
+        cancel=None,
     ):
         from parcel_dimensioner.measurement import save_measurement
 
@@ -110,6 +112,8 @@ class ScanSession:
         self.reference = None
         self.reference_metadata = None
         self.counter = 0
+        self.scale = scale
+        self.cancel = cancel
 
     def _capture(self, path):
         metadata = self.camera.capture(path)
@@ -129,20 +133,50 @@ class ScanSession:
         self.reference, self.reference_metadata = path, metadata
         return path
 
-    def scan(self):
+    def scan(self, *, dimensions_only_reason=None):
         if self.reference is None:
             raise MeasurementError("Capture the empty station first.")
         self.counter += 1
         folder = self.directory / f"scan-{self.counter:04}"
         folder.mkdir(exist_ok=False)
+        weight = {
+            "status": "unavailable",
+            "pounds": None,
+            "unit": "lb",
+            "stable": False,
+            "reason": dimensions_only_reason or "Scale not configured",
+        }
         try:
+            ticket = None
+            if self.scale is not None and dimensions_only_reason is None:
+                ticket = self.scale.wait_stable(self.cancel)
             path = folder / "box.jpg"
             metadata = self._capture(path)
+            if ticket is not None:
+                weight = self.scale.verify_capture(ticket, self.cancel)
             if metadata.get("ScalerCrop") != self.reference_metadata.get("ScalerCrop"):
                 self.reference = None
                 raise MeasurementError("Camera crop changed. Capture a new empty station.")
             result = self.measure(self.reference, path, folder / "review")
+            result = {
+                **result,
+                "weight": weight,
+                "scan_mode": "dimensions_and_weight" if ticket else "dimensions_only",
+            }
+            (folder / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
             return result, folder / "review" / "measurement.jpg"
         except Exception as exc:
             (folder / "error.txt").write_text(str(exc), encoding="utf-8")
+            (folder / "attempt.json").write_text(
+                json.dumps(
+                    {
+                        "status": "failed",
+                        "error": str(exc),
+                        "weight": weight,
+                        "dimensions_only_reason": dimensions_only_reason,
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
             raise

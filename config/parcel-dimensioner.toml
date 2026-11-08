@@ -13,3 +13,13 @@ preview_backend = "auto"
 # After calibration capture, uncomment and replace with its reported locked value.
 # lens_position = 1.0
 
+[scale]
+port = "auto"
+# Initial factor from the station's 5 lb and 10 lb tests; zero is set in the app.
+counts_per_pound = -10640.0
+calibration_id = "prototype-20261107-5lb-10lb"
+stable_seconds = 1.0
+stable_range_lb = 0.03
+timeout_seconds = 10.0
+freshness_seconds = 0.5
+

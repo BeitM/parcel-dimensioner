@@ -43,3 +43,11 @@ def test_rejects_unknown_settings(tmp_path: Path) -> None:
 
     with pytest.raises(SettingsError, match="unknown root setting"):
         load_settings(config)
+
+
+def test_loads_persistent_scale_calibration(tmp_path):
+    config = tmp_path / "scale.toml"
+    config.write_text('[scale]\ncounts_per_pound = -10640.0\nport = "/dev/ttyACM0"\n')
+    settings = load_settings(config)
+    assert settings.scale.counts_per_pound == -10640
+    assert settings.scale.port == "/dev/ttyACM0"

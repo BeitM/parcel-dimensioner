@@ -45,8 +45,10 @@ were not tested results. Confirm the actual acceptance requirements before use.
   and a protective scale-electronics enclosure.
 - The photo review could not conclusively verify camera Wide variant, Pi RAM, or
   ribbon length. Verify labels before relying on those exact specifications.
-- Pico owns scale acquisition, filtering/stability, tare, and the physical button.
-  Main Pi owns images, dimension fitting, barcode decoding, UI, and record storage.
+- Earlier plan: Pico owns scale acquisition, filtering/stability, tare, and the
+  physical button. Implemented 2026-11-07: Pico streams raw HX711 samples; the
+  main Pi handles calibration, explicit zeroing, stability, images, dimensions,
+  UI, and combined record storage. Barcode and the physical button remain future work.
 - No dedicated barcode reader or additional depth sensor was selected for the
   baseline; consider changes only if representative tests expose a limitation.
 

@@ -78,6 +78,56 @@ def test_crop_change_requires_new_reference(tmp_path):
     assert s.reference is None
 
 
+def test_combined_result_saved_with_locked_weight(tmp_path):
+    from parcel_dimensioner.scale import ScaleError
+
+    class Scale:
+        fail = False
+
+        def wait_stable(self, cancel):
+            if self.fail:
+                raise ScaleError("USB disconnected")
+            return object()
+
+        def verify_capture(self, ticket, cancel):
+            return {"status": "measured", "pounds": 5.01, "calibration_id": "test"}
+
+    s = session(tmp_path)
+    s.scale = Scale()
+    s.capture_empty()
+    result, _ = s.scan()
+    assert result["weight"]["pounds"] == 5.01
+    assert json.loads((s.directory / "scan-0001/result.json").read_text()) == result
+    s.scale.fail = True
+    with pytest.raises(ScaleError):
+        s.scan()
+    assert not (s.directory / "scan-0002/result.json").exists()
+    assert (s.directory / "scan-0002/attempt.json").exists()
+    result, _ = s.scan(dimensions_only_reason="USB disconnected; operator chose dimensions only")
+    assert result["scan_mode"] == "dimensions_only"
+    assert result["weight"]["pounds"] is None
+    assert "operator chose" in result["weight"]["reason"]
+
+
+def test_weight_change_after_photo_prevents_accepted_result(tmp_path):
+    from parcel_dimensioner.scale import ScaleError
+
+    class Scale:
+        def wait_stable(self, cancel):
+            return object()
+
+        def verify_capture(self, ticket, cancel):
+            raise ScaleError("Weight changed during capture")
+
+    s = session(tmp_path)
+    s.scale = Scale()
+    s.capture_empty()
+    with pytest.raises(ScaleError, match="changed during capture"):
+        s.scan()
+    assert (s.directory / "scan-0001/box.jpg").exists()
+    assert not (s.directory / "scan-0001/result.json").exists()
+
+
 def test_camera_focus_mismatch_rejected_and_close_releases_owner(tmp_path):
     from parcel_dimensioner.camera.contracts import CameraError
 

@@ -60,6 +60,20 @@ are lazy so the rest of the application can be developed and tested away from a
 Pi. Every still capture returns its path, camera identity, dimensions, timestamp,
 and Picamera2 metadata.
 
+## Scale and touchscreen slice (current)
+
+The Pico 2 runs `firmware/pico_scale/main.py` on power-up and publishes raw
+HX711 counts over USB. A dedicated Pi serial worker owns that connection and
+handles calibration, session zero, filtering, freshness, and stability. Tk polls
+its state without blocking camera/vision work. This implemented split places
+zeroing and stability on the Pi rather than the earlier proposed Pico ownership.
+
+The scan workflow requires stable weight, captures the image, and checks fresh
+samples across capture before accepting the combined record. A weight failure
+requires an explicit dimensions-only choice. The top-level scan `result.json`
+contains both capabilities; the existing review JSON remains vision-only.
+See [scale setup](scale.md) and [touchscreen operation](touchscreen.md).
+
 ## Measurement constraint
 
 A single uncalibrated RGB image cannot robustly recover all three dimensions of

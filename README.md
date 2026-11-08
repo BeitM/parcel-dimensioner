@@ -15,13 +15,14 @@ The application is intentionally split by capability:
 - **Measurement** — estimates dimensions of a rectangular box touching both
   ChArUco walls, using an empty reference image.
 - **Barcode** — will decode the parcel identifier from an image.
-- **Scale** — will read and stabilize the parcel weight.
-- **Workflow** — will coordinate a complete scan and persist the result.
-- **UI** — will present the live view and guide the operator on the attached
+- **Scale** — Pico/HX711 USB readings, explicit zeroing, stability checks, and
+  pounds saved with the touchscreen scan; see [scale setup](docs/scale.md).
+- **Workflow** — pairs dimensions and weight in a saved scan record.
+- **UI** — presents the live view and guides the operator on the attached
   display.
 
-Camera capture and an experimental measurement command exist today. Other planned
-capabilities are documented rather than represented by empty placeholder packages.
+Camera capture, experimental dimensions, and a touchscreen combined dimension/weight
+workflow exist today. Barcode and company-system delivery remain planned.
 
 See [docs/architecture.md](docs/architecture.md) for the boundaries and staged
 roadmap.
