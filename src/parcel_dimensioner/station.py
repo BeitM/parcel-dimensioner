@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import math
 import shutil
@@ -12,11 +13,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+from parcel_dimensioner.barcode_watch import LabelFrame
 from parcel_dimensioner.barcodes import (
     PackageIdError,
     barcode_result,
     decode_image,
     initial_identity,
+    validate_package_id,
     with_identity,
 )
 from parcel_dimensioner.camera.contracts import CameraError
@@ -25,7 +28,7 @@ from parcel_dimensioner.camera.picamera2_backend import (
     _plain_metadata,
     _set_manual_focus,
 )
-from parcel_dimensioner.label_capture import LabelRestoreError, capture_labels
+from parcel_dimensioner.label_capture import LabelRestoreError, _metadata, capture_labels
 from parcel_dimensioner.label_reader import target_bounds
 from parcel_dimensioner.measurement import (
     BOARDS,
@@ -47,13 +50,14 @@ class StationCamera:
         self.camera = None
         self.position = settings.lens_position
         self.restore_failed = False
+        self.listening = False
 
     def start(self):
         self.camera = _load_picamera2().Picamera2(self.settings.index)
         self.camera.configure(
             self.camera.create_still_configuration(
                 main={"size": (self.settings.width, self.settings.height), "format": "BGR888"},
-                lores={"size": (800, 450), "format": "YUV420"},
+                lores={"size": (1280, 720), "format": "YUV420"},
                 raw=None,
                 buffer_count=2,
                 queue=False,
@@ -85,7 +89,79 @@ class StationCamera:
         rgb = cv.cvtColor(frame, cv.COLOR_YUV2RGB_I420)[:height, :width]
         return Image.fromarray(rgb)
 
+    def label_frame(self, *, include_full=True):
+        """Own/release the request here; decoder receives independent PIL copies."""
+        from PIL import Image
+
+        self._check_restored()
+        cv, _ = _vision()
+        with self.camera.captured_request() as request:
+            array = request.make_array("lores")
+            width, height = self.camera.camera_configuration()["lores"]["size"]
+            preview = Image.fromarray(cv.cvtColor(array, cv.COLOR_YUV2RGB_I420)[:height, :width])
+            image = request.make_image("main").copy() if include_full else None
+            metadata = _plain_metadata(request.get_metadata())
+        return LabelFrame(image, preview, metadata, datetime.now(UTC).isoformat())
+
+    def start_label_focus(self):
+        if self.listening:
+            return
+        self._check_restored()
+        controls = importlib.import_module("libcamera").controls
+        x, y, w, h = self.camera.camera_properties["ScalerCropMaximum"]
+        values = {
+            "AfMode": controls.AfModeEnum.Continuous,
+            "AfMetering": controls.AfMeteringEnum.Windows,
+            "AfWindows": [
+                (round(x + w * 0.30), round(y + h * 0.25), round(w * 0.40), round(h * 0.50))
+            ],
+            "AeEnable": True,
+        }
+        if "AeExposureMode" in self.camera.camera_controls:
+            values["AeExposureMode"] = controls.AeExposureModeEnum.Short
+        if "ExposureValue" in self.camera.camera_controls:
+            values["ExposureValue"] = -0.5
+        if "AfRange" in self.camera.camera_controls:
+            values["AfRange"] = controls.AfRangeEnum.Full
+        # Mark the mode before submitting controls so a partial failure also
+        # requires station restoration before any subsequent capture.
+        self.listening = True
+        self.camera.set_controls(values)
+
+    def stop_label_focus(self):
+        if not self.listening:
+            return
+        controls = importlib.import_module("libcamera").controls
+        values = {"AfMetering": controls.AfMeteringEnum.Auto, "AeEnable": True}
+        if "AeExposureMode" in self.camera.camera_controls:
+            values["AeExposureMode"] = controls.AeExposureModeEnum.Normal
+        if "ExposureValue" in self.camera.camera_controls:
+            values["ExposureValue"] = 0.0
+        if "AfRange" in self.camera.camera_controls:
+            values["AfRange"] = controls.AfRangeEnum.Normal
+        try:
+            self.camera.set_controls(values)
+            _set_manual_focus(self.camera, self.position)
+            settled = 0
+            for _ in range(30):
+                metadata = _metadata(self.camera)
+                actual = metadata.get("LensPosition")
+                matches = isinstance(actual, (int, float)) and math.isclose(
+                    actual, self.position, abs_tol=0.05
+                )
+                settled = settled + 1 if matches else 0
+                if settled == 3:
+                    self.listening = False
+                    return
+            raise CameraError("Station focus did not settle after live barcode reading.")
+        except Exception as exc:
+            self.restore_failed = True
+            raise LabelRestoreError(
+                f"Could not restore station focus: {exc}. Reopen the app."
+            ) from exc
+
     def capture(self, path):
+        self.stop_label_focus()
         self._check_restored()
         metadata = _plain_metadata(self.camera.capture_file(str(path)) or {})
         reported = metadata.get("LensPosition")
@@ -189,6 +265,74 @@ class ScanSession:
     def clear_label(self):
         self.pending_label = None
 
+    def accept_live_label(self, frame, barcode):
+        """Latch one decoded source exposure. Never overwrite an already held ID."""
+        if self.pending_label is not None:
+            raise PackageIdError("A label is already held. Clear it before scanning another box.")
+        if not barcode.get("candidates"):
+            raise PackageIdError("No decoded label is available.")
+        self.last_scan = None
+        folder = self.directory / f"label-{uuid4().hex}"
+        folder.mkdir(exist_ok=False)
+        try:
+            frame.image.save(folder / "label.jpg", format="JPEG", quality=95)
+            self._capture_record(folder / "label.jpg", frame.metadata, frame.captured_at)
+            barcode = {
+                **barcode,
+                "candidates": [
+                    {
+                        **candidate,
+                        "positions": [
+                            {**location, "image": "label.jpg"}
+                            for location in candidate["positions"]
+                        ],
+                    }
+                    for candidate in barcode["candidates"]
+                ],
+            }
+            result = {
+                "scan_id": folder.name,
+                "barcode": barcode,
+                **initial_identity(barcode),
+                "label_capture": {
+                    "mode": "live",
+                    "primary_image": "label.jpg",
+                    "frames": [
+                        {
+                            "image": "label.jpg",
+                            "metadata": frame.metadata,
+                            "captured_at": frame.captured_at,
+                            "barcode": barcode,
+                        }
+                    ],
+                },
+            }
+            self._save_result(folder, result)
+            self.pending_label = folder, result
+            return result
+        except Exception as exc:
+            (folder / "error.txt").write_text(str(exc), encoding="utf-8")
+            raise
+
+    def manual_label(self, value):
+        value = validate_package_id(value)
+        if not value:
+            raise PackageIdError("Enter a package ID or choose Measure without barcode.")
+        self.clear_label()
+        self.last_scan = None
+        folder = self.directory / f"label-{uuid4().hex}"
+        folder.mkdir(exist_ok=False)
+        self._capture(folder / "label.jpg")
+        barcode = barcode_result(
+            [], image_size=[self.settings.width, self.settings.height], region="manual"
+        )
+        result = with_identity(
+            {"scan_id": folder.name, "barcode": barcode, **initial_identity(barcode)}, value
+        )
+        self._save_result(folder, result)
+        self.pending_label = folder, result
+        return result
+
     def scan_label(self, target=(0.5, 0.5), *, progress=None):
         self.last_scan = None
         self.clear_label()
@@ -270,7 +414,7 @@ class ScanSession:
         self.pending_label = folder, result
         return result
 
-    def scan(self, *, dimensions_only_reason=None):
+    def scan(self, *, dimensions_only_reason=None, skip_barcode=False):
         self.last_scan = None
         if self.reference is None:
             raise MeasurementError("Capture the empty station first.")
@@ -300,9 +444,18 @@ class ScanSession:
                 raise MeasurementError("Camera crop changed. Capture a new empty station.")
             result = self.measure(self.reference, path, folder / "review")
             if pending is None:
-                barcode = self.decoder(path, outline=result.get("box_contour_pixels", []))
+                if skip_barcode:
+                    barcode = barcode_result(
+                        [], image_size=[self.settings.width, self.settings.height], region="skipped"
+                    )
+                    barcode["status"] = "skipped"
+                else:
+                    barcode = self.decoder(path, outline=result.get("box_contour_pixels", []))
                 identity = initial_identity(barcode)
-                barcode_capture = {"mode": "measurement", "image": "box.jpg"}
+                barcode_capture = {
+                    "mode": "skipped" if skip_barcode else "measurement",
+                    "image": "box.jpg",
+                }
             else:
                 label_folder, label_result = pending
                 barcode = label_result["barcode"]

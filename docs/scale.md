@@ -57,15 +57,18 @@ cd ~/parcel-dimensioner
 
 1. Leave the platform and attached walls installed; remove packages and hands.
 2. Tap **Capture empty station**. This captures the camera reference and zeros
-   the scale. **Zero scale** can subsequently zero an empty platform without
+   the scale. **More > Zero scale** can subsequently zero an empty platform without
    replacing the image reference. Both buttons act immediately, without a
    confirmation popup; clear the platform before tapping either button.
-3. Place one box against both walls, take hands off, and tap **Measure box**.
+3. Hold the barcode close to the camera until **Barcode read** appears, then
+   place that same box against both walls, take hands off, and tap **Measure box**.
+   To skip barcodes explicitly, use **More > Measure without barcode**.
 4. The app waits up to 10 seconds for a stable weight, then captures the box and
    verifies a fresh reading after capture. Motion, sensor errors, stale data,
    and disconnection prevent an accepted combined scan.
-5. Read inches and **Saved weight** in pounds. **Live scale** continues updating
-   separately. Replacing/removing the box never changes the accepted result.
+5. Read inches and **Saved weight** in pounds. The scale status during label
+   presentation is a separate live reading. Removing the box never changes the
+   accepted result. Tap **Next box** when ready to start another package.
 6. On a weight error, fix it and retry, or explicitly choose **Measure dimensions
    only**. This creates a fresh scan with `weight.pounds: null` and a reason.
 
@@ -129,7 +132,8 @@ weight attempts before the photograph may have no `box.jpg`.
 3. Repeat at the centre and all corners. The earlier observed 10 lb readings
    varied by about 0.21 lb across corners; this implementation does not fix that.
 4. Run a complete box scan; inspect its top-level JSON for dimensions and weight.
-5. Remove the box: Live scale returns near zero; Saved weight remains unchanged.
+5. Remove the box: Saved weight remains unchanged. After Next box, the scale
+   status should return near zero.
 6. Disconnect Pico USB: live weight becomes unavailable; retrying a measurement
    offers an explicit dimensions-only choice. Its saved JSON must have null weight.
 7. Reconnect: it must require Zero scale. Restarting the app must also require

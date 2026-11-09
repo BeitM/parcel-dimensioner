@@ -60,6 +60,59 @@ def test_reference_reused_and_scans_saved_separately(tmp_path):
     assert session(tmp_path).reference is None
 
 
+def test_live_label_latches_source_frame_and_is_consumed_once(tmp_path):
+    from PIL import Image
+
+    from parcel_dimensioner.barcode_watch import LabelFrame
+    from parcel_dimensioner.barcodes import PackageIdError
+
+    s = session(tmp_path)
+    s.capture_empty()
+    image = Image.new("RGB", (1920, 1080), "white")
+    frame = LabelFrame(
+        image, image.resize((800, 450)), {"LensPosition": 8.5}, "2026-11-09T00:00:00+00:00"
+    )
+    barcode = {
+        "status": "found",
+        "selected_index": 0,
+        "candidates": [
+            {
+                "value": "LIVE-42",
+                "formats": ["Code 128"],
+                "positions": [{"points": [[800, 400], [1200, 400], [1200, 600], [800, 600]]}],
+            }
+        ],
+    }
+    label = s.accept_live_label(frame, barcode)
+    assert label["package_id"] == "LIVE-42"
+    with pytest.raises(PackageIdError, match="already held"):
+        s.accept_live_label(frame, barcode)
+    result, _ = s.scan()
+    folder, _ = s.last_scan
+    assert result["package_id"] == "LIVE-42"
+    assert json.loads((folder / "label.json").read_text())["metadata"]["LensPosition"] == 8.5
+    assert result["barcode_capture"]["source_frame"] == "label.jpg"
+    assert s.pending_label is None
+
+
+def test_explicit_barcode_skip_does_not_decode_and_manual_id_can_be_prepared(tmp_path):
+    s = session(tmp_path)
+    s.capture_empty()
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Explicitly skipped barcode decoding")
+
+    s.decoder = forbidden
+    result, _ = s.scan(skip_barcode=True)
+    assert result["barcode"]["status"] == "skipped"
+    assert result["package_id"] is None
+    label = s.manual_label(" MANUAL-42 ")
+    assert label["package_id"] == "MANUAL-42"
+    result, _ = s.scan()
+    assert result["package_id"] == "MANUAL-42"
+    assert result["package_id_source"] == "manual"
+
+
 def test_failed_reference_replacement_invalidates_old_reference(tmp_path):
     s = session(tmp_path)
     old = s.capture_empty()
@@ -377,8 +430,8 @@ def test_camera_full_resolution_configuration_uses_small_preview_stream(monkeypa
         create_still_configuration=lambda **kwargs: kwargs,
         configure=lambda config: configured.append(config),
         start=lambda: None,
-        capture_array=lambda stream: streams.append(stream) or np.full((675, 800), 128, np.uint8),
-        camera_configuration=lambda: {"lores": {"size": (800, 450)}},
+        capture_array=lambda stream: streams.append(stream) or np.full((1080, 1280), 128, np.uint8),
+        camera_configuration=lambda: {"lores": {"size": (1280, 720)}},
     )
     monkeypatch.setattr(
         station, "_load_picamera2", lambda: SimpleNamespace(Picamera2=lambda _: device)
@@ -388,11 +441,45 @@ def test_camera_full_resolution_configuration_uses_small_preview_stream(monkeypa
     camera = StationCamera(CameraSettings(lens_position=1.0))
     camera.start()
     assert configured[0]["main"]["size"] == (4608, 2592)
-    assert configured[0]["lores"] == {"size": (800, 450), "format": "YUV420"}
+    assert configured[0]["lores"] == {"size": (1280, 720), "format": "YUV420"}
     assert configured[0]["raw"] is None and configured[0]["buffer_count"] == 2
     assert device.options["quality"] == 95
-    assert camera.preview().size == (800, 450)
+    assert camera.preview().size == (1280, 720)
     assert streams == ["lores"]
+
+
+def test_live_frame_copies_images_and_releases_request_before_decoding():
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    import numpy as np
+    from PIL import Image
+
+    full = Image.new("RGB", (640, 360), "#eeeeee")
+    released = []
+    request = SimpleNamespace(
+        make_array=lambda name: np.full((270, 320), 128, np.uint8),
+        make_image=lambda name: full,
+        get_metadata=lambda: {"LensPosition": 8.0, "ScalerCrop": (0, 0, 640, 360)},
+    )
+
+    @contextmanager
+    def captured():
+        try:
+            yield request
+        finally:
+            released.append(True)
+            full.paste("black", (0, 0, 640, 360))
+
+    camera = StationCamera(CameraSettings(lens_position=1.0))
+    camera.camera = SimpleNamespace(
+        captured_request=captured, camera_configuration=lambda: {"lores": {"size": (320, 180)}}
+    )
+    frame = camera.label_frame()
+    assert released == [True]
+    assert frame.image.getpixel((0, 0)) == (238, 238, 238)
+    assert frame.preview.size == (320, 180)
+    assert frame.metadata["ScalerCrop"] == [0, 0, 640, 360]
 
 
 def test_desktop_entry_keeps_venv_path_and_focus():

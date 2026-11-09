@@ -21,7 +21,10 @@ def camera(monkeypatch):
             self.values = (x, y, width, height)
 
     controls = SimpleNamespace(
-        AfModeEnum=SimpleNamespace(Manual=0), AfMeteringEnum=SimpleNamespace(Auto=0, Windows=1)
+        AfModeEnum=SimpleNamespace(Manual=0, Continuous=2),
+        AfMeteringEnum=SimpleNamespace(Auto=0, Windows=1),
+        AeExposureModeEnum=SimpleNamespace(Normal=0, Short=1),
+        AfRangeEnum=SimpleNamespace(Normal=0, Full=2),
     )
     monkeypatch.setitem(
         sys.modules, "libcamera", SimpleNamespace(controls=controls, Rectangle=Rectangle)
@@ -36,6 +39,9 @@ def camera(monkeypatch):
             "AeEnable": (False, True, True),
             "ExposureTime": (50, 200000, None),
             "AnalogueGain": (1, 16, None),
+            "AeExposureMode": (0, 2, 0),
+            "ExposureValue": (-8, 8, 0),
+            "AfRange": (0, 2, 0),
         }
         camera_properties: ClassVar = {"ScalerCropMaximum": [0, 0, 4608, 2592]}
 
@@ -163,3 +169,35 @@ def test_camera_contract_reproduces_prebuilt_rectangle_failure(camera):
     rectangle = sys.modules["libcamera"].Rectangle(2028, 1477, 553, 415)
     with pytest.raises(TypeError):
         camera.set_controls({"AfWindows": [rectangle]})
+
+
+def test_continuous_label_focus_restores_station_before_measurement(camera):
+    from parcel_dimensioner.settings import CameraSettings
+    from parcel_dimensioner.station import StationCamera
+
+    wrapper = StationCamera(CameraSettings(lens_position=1.0))
+    wrapper.camera = camera
+    wrapper.start_label_focus()
+    assert camera.requests[-1]["AfMode"] == 2
+    assert camera.requests[-1]["AfRange"] == 2
+    assert camera.windows[0].values == (1382, 648, 1843, 1296)
+    camera.metadata["LensPosition"] = 7.0
+    wrapper.stop_label_focus()
+    assert not wrapper.listening
+    assert camera.metadata["LensPosition"] == 1.0
+    assert camera.requests[-2]["ExposureValue"] == 0
+    assert camera.requests[-2]["AeExposureMode"] == 0
+
+
+def test_continuous_focus_restore_failure_blocks_capture(camera, tmp_path):
+    from parcel_dimensioner.settings import CameraSettings
+    from parcel_dimensioner.station import StationCamera
+
+    wrapper = StationCamera(CameraSettings(lens_position=1.0))
+    wrapper.camera = camera
+    wrapper.start_label_focus()
+    camera.fail_restore = True
+    with pytest.raises(LabelRestoreError):
+        wrapper.stop_label_focus()
+    with pytest.raises(CameraError):
+        wrapper.capture(tmp_path / "box.jpg")

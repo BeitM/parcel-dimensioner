@@ -77,45 +77,45 @@ at startup and locks that position; keep the wall patterns clearly visible.
    Tap **Capture empty station** to act immediately. The app checks both walls and the
    floor edge and zeros the scale. An unavailable scale does not prevent saving
    the image reference; the app explains that weight is unavailable.
-3. Rest the box away from the corner and turn its barcode toward the camera.
-   Tap the barcode in **Live view**, then **Scan label**. A small focus box marks
-   the target. Keep the box still through targeted autofocus, three varied-exposure
-   photos, and decoding. Check the pending ID (choose among multiple codes if
-   needed). It does not need to be held close if enough detail is visible.
-   Station focus and automatic exposure are restored before measuring.
-   **Clear label** discards a pending ID. Without a pending label, Measure box
-   still attempts decoding from its own full-resolution image.
-   Place that same box snugly against both walls and take your hands off. Tap **Measure
-   box**. The app waits for stable weight, captures the image, and checks for
-   movement across capture before calculating dimensions. The preview pauses
-   during this operation; the live scale status continues updating.
-4. Read **Length, Width, Height** in inches and **Saved weight** in pounds.
+3. Hold the barcode close to the camera and steady inside the guide. Reading
+   and focusing happen automatically, without tapping the preview or a Scan
+   label button. Wait for the green **Barcode read** message and optional chime.
+   Check the displayed ID. Multiple distinct codes require **Choose ID**.
+   The app then pauses reading and restores normal station focus/exposure.
+4. Put that same box snugly against both walls and remove your hands. Tap
+   **Measure box**. The app waits for stable weight, captures the image, and
+   verifies weight across capture before calculating dimensions. The preview
+   pauses during measurement; the scale reader continues independently.
+5. Read **Length, Width, Height** in inches and **Saved weight** in pounds.
    The **Package ID** row shows whether a barcode was found. Use **Choose ID**
    for multiple codes, or **Enter ID / Edit ID** for manual entry/correction with
    the built-in touch keyboard. **Save ID** updates this scan's saved record.
    Barcode failure does not discard dimensions or weight. See [barcode setup
    and operation](barcodes.md) for details and label tests.
-   **Live scale** is a separate current reading; removing a box does not change
+   Measurement cards appear only after a result. The smaller scale status is a
+   current reading during the first two steps; removing a box does not change
    its saved weight. Tap **Marked result** to inspect the chosen points,
    then **Live view** to return to the camera. Results are saved automatically.
-5. For the next box, scan its label first, then tap **Measure box** again. A
-   successful scan consumes the pending ID so it cannot carry into the next box.
-   Without a pending label, measurement still attempts decoding in `box.jpg`.
-   No new empty image is needed
+6. Remove the box and tap **Next box** to rearm barcode reading for the next
+   package. The completed ID is cleared. No automatic replacement or carryover
+   is allowed. A new empty image is not needed
    while the station, camera, focus, platform, and lighting stay unchanged.
-6. Use **Zero scale** only with the empty platform. This leaves the camera
+7. **More** contains Capture empty station, Zero scale, Enter / edit ID,
+   Rescan label, Measure without barcode, and Exit app. Reading pauses while
+   this menu or an ID editor is open. Use **More > Zero scale** only with the
+   empty platform. This leaves the camera
    reference intact. Capture a fresh empty reference after a physical or lighting
    change. Every restart requires a fresh reference and explicit scale zero.
    USB reconnects also require another zero. The calibration factor persists.
-7. If weight cannot be obtained, retry with **Measure box**, or explicitly tap
+8. If weight cannot be obtained, retry with **Measure box**, or explicitly tap
    **Measure dimensions only**. That takes a new image and saves weight as
    unavailable with the reason. There is no silent fallback or reused old weight.
-8. Tap the square **Exit** button in the preview's upper-right to close both
-   camera and scale. The taller main buttons form two columns: Capture empty
-   station / Zero scale on the left; Measure box / Marked result on the right.
+9. Tap the square **Exit** button in the preview's upper-right to close both
+   camera and scale. The main action changes with the current step; **More**
+   keeps setup and correction controls out of the normal two-step workflow.
 
 A failed scan clears the previous dimensions so they cannot be mistaken for
-the new box. A pending label is retained for a retry; Clear label discards it.
+the new box. A pending label is retained for a retry; More > Rescan label discards it.
 Fix the reported problem and retry. If camera startup fails, close
 other camera applications and reopen Box Scanner. If capture reports changed
 focus, reopen the app and capture a new empty reference. Substantial station
@@ -144,10 +144,11 @@ captured. A failure before capture has no box image. Original capture images are
 not overwritten. The derived `review/scan.jpg` is regenerated after ID edits.
 These runtime files are ignored by Git.
 
-The application owns one camera for preview and all captures, with unchanged
-resolution and locked focus throughout the session. Camera and measurement work
-run on one background worker; a separate USB reader continuously acquires scale
-samples. Tk widgets are updated only on the UI thread.
+The application owns one camera for preview and all captures. Continuous
+autofocus is used during label listening; the original locked station focus is
+restored before measurement. Copied source frames are decoded on a separate
+background worker so preview updates can continue. A separate USB reader
+continuously acquires scale samples. Tk widgets update only on the UI thread.
 There is no automatic detection of when a box has been placed or removed: each
 scan is explicitly triggered by a tap. Review results before using them elsewhere.
 

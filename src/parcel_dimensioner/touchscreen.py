@@ -1,218 +1,81 @@
-"""Touchscreen scanner: separate camera/vision and continuous USB scale workers."""
+"""Two-step touchscreen workflow: show a barcode, then measure the box."""
 
 from __future__ import annotations
 
 import queue
-import threading
+import time
 from contextlib import suppress
 from pathlib import Path
 
+from parcel_dimensioner.barcode_watch import GUIDE
 from parcel_dimensioner.camera.contracts import CameraError
-from parcel_dimensioner.label_reader import preview_point, target_bounds
+from parcel_dimensioner.feedback import barcode_chime
 from parcel_dimensioner.measurement import _vision
 from parcel_dimensioner.package_id_editor import display_text, open_package_id_editor
-from parcel_dimensioner.scale import ScaleError, SerialScale
 from parcel_dimensioner.settings import ScaleSettings
-from parcel_dimensioner.station import ScanSession, StationCamera
-
-
-class StationWorker(threading.Thread):
-    def __init__(self, settings, captures_dir, scale_settings=None):
-        super().__init__(daemon=True)
-        self.settings, self.captures_dir = settings, captures_dir
-        self.commands = queue.Queue(maxsize=1)
-        self.events = queue.Queue()
-        self.frames = queue.Queue(maxsize=1)
-        self.stopping = threading.Event()
-        self.scale = SerialScale(scale_settings)
-        self.review_warning = ""
-
-    def run(self):
-        camera = StationCamera(self.settings)
-        try:
-            self.scale.start()
-            camera.start()
-            session = ScanSession(
-                self.captures_dir, camera, self.settings, scale=self.scale, cancel=self.stopping
-            )
-            self.events.put(("ready", str(session.directory)))
-            while not self.stopping.is_set():
-                try:
-                    action = self.commands.get_nowait()
-                except queue.Empty:
-                    action = None
-                if action:
-                    command, reason = action if isinstance(action, tuple) else (action, None)
-                    try:
-                        if command == "empty":
-                            session.capture_empty()
-                            try:
-                                self.scale.zero(self.stopping)
-                                note = "Empty reference captured and scale zeroed."
-                            except ScaleError as exc:
-                                note = f"Empty reference captured. Scale: {exc}"
-                            self.events.put(("empty", note))
-                        elif command == "zero":
-                            session.last_scan = None
-                            session.clear_label()
-                            self.scale.zero(self.stopping)
-                            self.events.put(("zero", "Scale zeroed. Place a box to measure."))
-                        elif command == "label":
-                            result = session.scan_label(
-                                **(reason or {}),
-                                progress=lambda note: self.events.put(("label_progress", note)),
-                            )
-                            self.events.put(("label", result))
-                        elif command == "clear_label":
-                            session.clear_label()
-                            self.events.put(("label", None))
-                        elif command == "label_id":
-                            self.events.put(("label", session.set_label_id(**reason)))
-                        elif command == "package_id":
-                            result = session.set_package_id(**reason)
-                            self.review_warning = session.review_warning
-                            self.events.put(("package_id", (result, session.review_path)))
-                        else:
-                            result = session.scan(dimensions_only_reason=reason)
-                            self.review_warning = session.review_warning
-                            self.events.put(("result", result))
-                    except ScaleError as exc:
-                        event = "zero_error" if command == "zero" else "weight_error"
-                        self.events.put((event, (str(exc), session.reference is not None)))
-                    except Exception as exc:
-                        event = (
-                            "package_id_error"
-                            if command in ("package_id", "label_id")
-                            else "label_error"
-                            if command == "label"
-                            else "error"
-                        )
-                        self.events.put((event, (str(exc), session.reference is not None)))
-                if self.stopping.is_set():
-                    break
-                frame = camera.preview()
-                with suppress(queue.Empty):
-                    self.frames.get_nowait()
-                self.frames.put_nowait(frame)
-                self.stopping.wait(0.15)
-        except Exception as exc:
-            self.events.put(("fatal", str(exc)))
-        finally:
-            try:
-                camera.close()
-            finally:
-                self.scale.close()
-                self.events.put(("closed", None))
+from parcel_dimensioner.station_worker import StationWorker
 
 
 def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, windowed=False):
     try:
         import tkinter as tk
 
-        from PIL import Image, ImageTk
+        from PIL import Image, ImageDraw, ImageTk
     except ImportError as exc:
         raise CameraError(
-            "Install python3-tk and python3-pil.imagetk with apt, "
-            "then install this project's [touchscreen] extra."
+            "Install python3-tk, python3-pil.imagetk, and this project's [touchscreen] extra."
         ) from exc
     _vision()
     try:
         root = tk.Tk()
     except tk.TclError as exc:
         raise CameraError(
-            "Open the app on the Pi desktop or through Pi Connect screen sharing."
+            "Open Box Scanner on the Pi desktop or Pi Connect screen sharing."
         ) from exc
     root.title("Box Scanner")
     root.geometry("1000x680")
     root.attributes("-fullscreen", not windowed)
     root.configure(bg="#10202c")
     worker = StationWorker(settings, captures_dir, scale_settings or ScaleSettings())
-    state = {
-        "ready": False,
-        "empty": False,
-        "busy": True,
-        "closing": False,
-        "review": None,
-        "show_review": False,
-        "photo": None,
-        "fallback": None,
-        "result": None,
-        "editing": False,
-        "pending_label": None,
-        "label_target": (0.5, 0.5),
-        "target_selected": False,
-        "preview_bounds": None,
-        "live_frame": None,
-    }
+    state = dict(
+        ready=False,
+        empty=False,
+        busy=True,
+        closing=False,
+        editing=False,
+        menu=None,
+        phase="setup",
+        pending=None,
+        result=None,
+        review=None,
+        show_review=False,
+        live=None,
+        photo=None,
+        display_key=None,
+        listening=False,
+        fallback=None,
+        beep_id=None,
+        confirm_until=0,
+    )
     portrait = root.winfo_screenheight() > root.winfo_screenwidth()
     font = 16 if portrait else 14
-
-    # The preview is the first content on screen. Exit overlays its upper-right corner.
-    preview_frame = tk.Frame(root, bg="#08131b", height=80)
+    preview_frame = tk.Frame(root, bg="#08131b", height=100)
     preview_frame.pack_propagate(False)
-    preview_frame.pack(side="top", fill="both", expand=True, padx=8, pady=(8, 4))
+    preview_frame.pack(fill="both", expand=True, padx=8, pady=(8, 6))
     preview = tk.Label(preview_frame, bg="#08131b")
     preview.pack(fill="both", expand=True)
 
-    results = tk.Frame(root, bg="#10202c")
-    results.pack(fill="x", padx=12, pady=2)
-    values = {}
-    for index, (key, label) in enumerate(
-        [("length", "Length"), ("width", "Width"), ("height", "Height"), ("weight", "Saved weight")]
-    ):
-        row, column = divmod(index, 2)
-        card = tk.Frame(results, bg="#193442")
-        card.grid(row=row, column=column, sticky="nsew", padx=3, pady=3)
-        results.columnconfigure(column, weight=1, uniform="measurements")
-        tk.Label(card, text=label, bg="#193442", fg="#c3d6e2", font=("Sans", 11)).pack()
-        values[key] = tk.StringVar(value="—")
-        tk.Label(
-            card,
-            textvariable=values[key],
-            bg="#193442",
-            fg="white",
-            font=("Sans", 22 if portrait else 19, "bold"),
-        ).pack(pady=(0, 3))
-    package_frame = tk.Frame(root, bg="#10202c")
-    package_frame.pack(fill="x", padx=15, pady=3)
-    package_frame.columnconfigure(0, weight=1)
-    package_value = tk.StringVar(value="Package ID: —")
-    package_status = tk.StringVar(
-        value="For labels: tap the barcode in live view, then Scan label."
-    )
-    package_label = tk.Label(
-        package_frame,
-        textvariable=package_value,
-        anchor="w",
-        justify="left",
+    headline = tk.StringVar(value="Starting camera…")
+    headline_label = tk.Label(
+        root,
+        textvariable=headline,
         bg="#10202c",
         fg="white",
-        font=("Sans", font, "bold"),
-        wraplength=450,
-    )
-    package_label.grid(row=0, column=0, sticky="ew")
-    barcode_label = tk.Label(
-        package_frame,
-        textvariable=package_status,
-        anchor="w",
-        justify="left",
-        bg="#10202c",
-        fg="#c3d6e2",
-        font=("Sans", 11),
-        wraplength=450,
-    )
-    barcode_label.grid(row=1, column=0, sticky="ew")
-    live_weight = tk.StringVar(value="Live scale: connecting…")
-    live_label = tk.Label(
-        root,
-        textvariable=live_weight,
-        bg="#10202c",
-        fg="#c3d6e2",
-        font=("Sans", font),
+        font=("Sans", 22 if portrait else 20, "bold"),
         wraplength=600,
     )
-    live_label.pack(fill="x", padx=12, pady=3)
-    status = tk.StringVar(value="Starting camera…")
+    headline_label.pack(fill="x", padx=12, pady=(3, 2))
+    status = tk.StringVar(value="Connecting to the station.")
     status_label = tk.Label(
         root,
         textvariable=status,
@@ -222,241 +85,343 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
         wraplength=600,
         justify="center",
     )
-    status_label.pack(fill="x", padx=12, pady=3)
-    controls = tk.Frame(root, bg="#10202c")
-    controls.pack(padx=8, pady=(4, 8))
+    status_label.pack(fill="x", padx=14, pady=(0, 6))
+    identity = tk.Frame(root, bg="#193442")
+    package_value = tk.StringVar(value="")
+    package_label = tk.Label(
+        identity,
+        textvariable=package_value,
+        bg="#193442",
+        fg="#71dcc4",
+        font=("Sans", font, "bold"),
+        anchor="w",
+        justify="left",
+        wraplength=450,
+    )
+    package_label.pack(side="left", fill="x", expand=True, padx=10, pady=10)
 
-    def resize(event):
-        width = max(180, event.width - 24)
-        status_label.configure(wraplength=width)
-        live_label.configure(wraplength=width)
-        package_label.configure(wraplength=max(140, width - 120))
-        barcode_label.configure(wraplength=max(140, width - 120))
-        for control in (empty_button, zero_button, scan_button, review_button):
-            control.configure(wraplength=max(100, min(210, width // 2 - 24)))
+    results = tk.Frame(root, bg="#10202c")
+    values = {}
+    for index, (key, label) in enumerate(
+        (("length", "Length"), ("width", "Width"), ("height", "Height"), ("weight", "Saved weight"))
+    ):
+        row, column = divmod(index, 2)
+        results.columnconfigure(column, weight=1, uniform="measurements")
+        card = tk.Frame(results, bg="#193442")
+        card.grid(row=row, column=column, sticky="nsew", padx=3, pady=3)
+        tk.Label(card, text=label, bg="#193442", fg="#c3d6e2", font=("Sans", 11)).pack()
+        values[key] = tk.StringVar(value="—")
+        tk.Label(
+            card, textvariable=values[key], bg="#193442", fg="white", font=("Sans", 22, "bold")
+        ).pack(pady=(0, 3))
+    live_weight = tk.StringVar(value="Scale: connecting…")
+    scale_label = tk.Label(
+        root,
+        textvariable=live_weight,
+        bg="#10202c",
+        fg="#c3d6e2",
+        font=("Sans", 12),
+        wraplength=600,
+    )
+    footer = tk.Frame(root, bg="#10202c")
+    footer.pack(side="bottom", pady=(6, 10), padx=12)
+    footer.columnconfigure(0, weight=1)
 
-    root.bind("<Configure>", lambda event: resize(event) if event.widget is root else None)
-
-    def clear_result():
-        for value in values.values():
-            value.set("—")
-        state.update(review=None, show_review=False, result=None)
-        review_button.configure(text="Marked result")
-        update_package()
-
-    def update_package():
-        result = state["pending_label"] or state["result"] or {}
-        value = result.get("package_id")
-        package_value.set("Package ID: " + (display_text(value, 44) if value else "—"))
-        barcode = result.get("barcode", {})
-        candidates = barcode.get("candidates", [])
-        source = result.get("package_id_source")
-        if source == "manual":
-            message = "Manual ID saved"
-        elif value and source in ("barcode", "selected_barcode"):
-            index = barcode.get("selected_index")
-            formats = "/".join(candidates[index]["formats"]) if index is not None else ""
-            message = "Barcode found • " + formats + " • review ID"
-        elif len(candidates) > 1:
-            message = f"{len(candidates)} barcodes found • choose the package ID"
-        elif candidates:
-            message = "Barcode found • choose or enter the package ID"
-        elif barcode.get("status") == "not_found":
-            message = "No barcode found • enter an ID"
-        elif result:
-            message = "Barcode unavailable • enter an ID"
-        else:
-            message = "For labels: tap the barcode in live view, then Scan label."
-        if state["pending_label"]:
-            message = "Next box • " + message
-        package_status.set(message)
-        barcode_label.configure(fg="#71dcc4" if value else "#ffca78")
-        id_button.configure(text="Edit ID" if value else "Choose ID" if candidates else "Enter ID")
-
-    def enable_buttons():
-        idle = (
+    def idle():
+        return (
             state["ready"] and not state["busy"] and not state["closing"] and not state["editing"]
         )
-        empty_button.configure(state="normal" if idle else "disabled")
-        zero_button.configure(state="normal" if idle else "disabled")
-        label_ready = not state["pending_label"] or bool(state["pending_label"].get("package_id"))
-        scan_button.configure(
-            state="normal" if idle and state["empty"] and label_ready else "disabled"
+
+    def refresh():
+        target = state["pending"] or state["result"] or {}
+        value = target.get("package_id")
+        candidates = target.get("barcode", {}).get("candidates", [])
+        identity.pack_forget()
+        results.pack_forget()
+        review_button.pack_forget()
+        scale_label.pack_forget()
+        fallback_button.pack_forget()
+        if target:
+            package_value.set(
+                "ID: " + (display_text(value, 44) if value else "Choose the correct barcode")
+            )
+            package_label.configure(fg="#71dcc4" if value else "#ffca78")
+            edit_button.configure(
+                text="Edit" if value else "Choose ID" if candidates else "Enter ID"
+            )
+            identity.pack(fill="x", padx=15, pady=4, before=footer)
+        else:
+            package_value.set("")
+        if state["result"]:
+            results.pack(fill="x", padx=12, pady=3, before=footer)
+            if state["review"]:
+                review_button.pack(pady=(3, 0), before=footer)
+        else:
+            scale_label.pack(fill="x", padx=12, pady=4, before=footer)
+        if state["fallback"]:
+            fallback_button.pack(pady=4, before=footer)
+        if not state["ready"]:
+            title = "Starting camera…" if state["busy"] else "Station stopped"
+        elif state["phase"] == "setup":
+            title = "Prepare station"
+        elif state["phase"] == "label":
+            title = "1 · Show barcode"
+        elif state["phase"] == "choose":
+            title = "Choose a barcode"
+        elif state["phase"] == "result":
+            title = "Measurement saved"
+        elif time.monotonic() < state["confirm_until"]:
+            title = "Barcode read"
+        else:
+            title = "2 · Place box in corner"
+        if state["closing"]:
+            title = "Closing…"
+        headline.set(title)
+        headline_label.configure(
+            fg="#71dcc4" if title in ("Barcode read", "Measurement saved") else "white"
         )
-        review_button.configure(state="normal" if idle and state["review"] else "disabled")
-        fallback_button.configure(
-            state="normal" if idle and state["empty"] and label_ready else "disabled"
+        action = (
+            "Capture empty station"
+            if not state["empty"]
+            else "Waiting for barcode"
+            if state["phase"] == "label"
+            else "Next box"
+            if state["phase"] == "result"
+            else "Choose ID"
+            if state["phase"] == "choose"
+            else "Measure box"
         )
-        label_button.configure(state="normal" if idle else "disabled")
-        clear_label_button.configure(
-            state="normal" if idle and state["pending_label"] else "disabled"
+        primary_button.configure(
+            text=action, state="normal" if idle() and state["phase"] != "label" else "disabled"
         )
-        target = state["pending_label"] or state["result"]
-        editable = idle and target and target.get("scan_id")
-        id_button.configure(state="normal" if editable else "disabled")
+        more_button.configure(state="normal" if idle() else "disabled")
+        edit_button.configure(state="normal" if idle() and target else "disabled")
+        review_button.configure(
+            state="normal" if idle() else "disabled",
+            text="Live view" if state["show_review"] else "Marked result",
+        )
+        fallback_button.configure(state="normal" if idle() else "disabled")
+
+    def clear_result():
+        state.update(result=None, review=None, show_review=False, display_key=None)
+        for value in values.values():
+            value.set("—")
 
     def submit(action):
-        if state["busy"] or not state["ready"] or state["closing"] or state["editing"]:
+        if not idle():
             return
-        if action == "empty":
-            state["empty"] = False
-        if action in ("empty", "zero", "label", "clear_label"):
-            state["pending_label"] = None
         reason = state["fallback"] if action == "dimensions_only" else None
         if action == "dimensions_only" and reason is None:
             return
         state.update(busy=True, fallback=None)
-        fallback_button.pack_forget()
+        if action in ("empty", "zero", "next", "clear_label", "skip"):
+            state["pending"] = None
+        if action == "empty":
+            state["empty"] = False
         clear_result()
         status.set(
             {
-                "empty": "Capturing empty station and zeroing scale…",
-                "zero": "Keep hands off — zeroing scale…",
-                "scan": "Waiting for stable weight, then capturing…",
-                "dimensions_only": "Capturing dimensions only — weight will be unavailable.",
-                "label": "Rest the box, label facing camera — taking several label pictures…",
-                "clear_label": "Clearing pending label…",
+                "empty": "Remove all boxes — capturing empty and zeroing scale…",
+                "zero": "Keep the platform empty and hands off — zeroing…",
+                "scan": "Keep hands off — waiting for stable weight and measuring…",
+                "dimensions_only": "Measuring dimensions only. Weight will be unavailable.",
+                "next": "Starting the next box…",
+                "clear_label": "Listening for another barcode…",
+                "skip": "Preparing to measure without a barcode…",
             }[action]
         )
-        enable_buttons()
-        command = ("scan", reason) if action == "dimensions_only" else action
-        if action == "label":
-            command = ("label", {"target": state["label_target"]})
-        worker.commands.put_nowait(command)
+        refresh()
+        worker.commands.put_nowait(("scan", reason) if action == "dimensions_only" else action)
 
-    def select_label(event):
-        if state["busy"] or state["closing"] or state["editing"] or state["show_review"]:
-            return
-        bounds = state["preview_bounds"]
-        point = preview_point(event.x, event.y, bounds) if bounds else None
-        if point is not None:
-            state.update(label_target=point, target_selected=True)
-            status.set(
-                "Label target set. Rest the box, face label toward camera, then tap Scan label."
-            )
+    def primary():
+        if not state["empty"]:
+            submit("empty")
+        elif state["phase"] == "result":
+            submit("next")
+        elif state["phase"] == "choose":
+            edit_package()
+        else:
+            submit("scan")
 
-    preview.bind("<Button-1>", select_label)
-
-    def toggle_review():
-        state["show_review"] = not state["show_review"]
-        review_button.configure(text="Live view" if state["show_review"] else "Marked result")
+    def close_menu(resume=True):
+        dialog = state["menu"]
+        state["menu"] = None
+        if dialog is not None:
+            dialog.destroy()
+        if resume and not state["editing"]:
+            worker.paused.clear()
 
     def edit_package():
-        if state["busy"] or state["editing"] or state["closing"]:
+        if not idle():
             return
-        result = state["pending_label"] or state["result"]
-        if not result:
-            return
-        editing_label = state["pending_label"] is not None
+        close_menu(resume=False)
+        worker.paused.set()
+        target = state["pending"] or state["result"]
+        draft = target is None
+        pending = state["pending"] is not None
+        target = target or {
+            "barcode": {"candidates": [], "selected_index": None},
+            "package_id": None,
+        }
         state["editing"] = True
-        enable_buttons()
+        refresh()
 
         def closed():
             state["editing"] = False
-            enable_buttons()
+            worker.paused.clear()
+            refresh()
 
-        def save(value, candidate_index):
+        def save(value, index):
             state["busy"] = True
-            enable_buttons()
             status.set("Saving package ID…")
-            worker.commands.put_nowait(
-                (
-                    "label_id" if editing_label else "package_id",
-                    {
-                        "scan_id": result["scan_id"],
-                        "value": value,
-                        "candidate_index": candidate_index,
-                    },
+            refresh()
+            if draft:
+                worker.commands.put_nowait(("manual_id", value))
+            else:
+                worker.commands.put_nowait(
+                    (
+                        "label_id" if pending else "package_id",
+                        {"scan_id": target["scan_id"], "value": value, "candidate_index": index},
+                    )
                 )
-            )
 
-        open_package_id_editor(root, result, save, closed)
+        open_package_id_editor(root, target, save, closed)
 
-    id_button = tk.Button(
-        package_frame,
-        text="Enter ID",
-        command=edit_package,
-        font=("Sans", 11, "bold"),
-        bg="#345269",
-        fg="white",
-        height=2,
-        width=9,
-        takefocus=False,
-    )
-    id_button.grid(row=0, column=1, rowspan=2, padx=(8, 0), sticky="e")
+    def more():
+        if not idle() or state["menu"] is not None:
+            return
+        worker.paused.set()
+        dialog = tk.Toplevel(root)
+        state["menu"] = dialog
+        dialog.title("Station options")
+        dialog.configure(bg="#10202c")
+        dialog.transient(root)
+        width, height = min(560, root.winfo_width() - 24), min(540, root.winfo_height() - 24)
+        x = root.winfo_rootx() + (root.winfo_width() - width) // 2
+        y = root.winfo_rooty() + (root.winfo_height() - height) // 2
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
+        dialog.grab_set()
+        tk.Label(
+            dialog, text="Station options", font=("Sans", 20, "bold"), bg="#10202c", fg="white"
+        ).pack(pady=14)
+        body = tk.Frame(dialog, bg="#10202c")
+        body.pack(fill="both", expand=True, padx=10)
+        for column in (0, 1):
+            body.columnconfigure(column, weight=1, uniform="options")
 
-    label_actions = tk.Frame(package_frame, bg="#10202c")
-    label_actions.grid(row=2, column=0, columnspan=2, pady=(4, 0))
-    label_button = tk.Button(
-        label_actions,
-        text="Scan label",
-        command=lambda: submit("label"),
-        font=("Sans", 12, "bold"),
-        bg="#007b70",
-        fg="white",
-        height=2,
-        width=14,
-        takefocus=False,
-    )
-    label_button.pack(side="left", padx=4)
-    clear_label_button = tk.Button(
-        label_actions,
-        text="Clear label",
-        command=lambda: submit("clear_label"),
-        font=("Sans", 12, "bold"),
-        bg="#345269",
-        fg="white",
-        height=2,
-        width=14,
-        takefocus=False,
-    )
-    clear_label_button.pack(side="left", padx=4)
+        def perform(action):
+            close_menu(resume=False)
+            submit(action)
+            worker.paused.clear()
+
+        options = (
+            ("Capture empty station", lambda: perform("empty"), True),
+            ("Zero scale", lambda: perform("zero"), True),
+            ("Enter / edit ID", edit_package, state["empty"]),
+            ("Rescan label", lambda: perform("clear_label"), state["empty"]),
+            ("Measure without barcode", lambda: perform("skip"), state["empty"]),
+            ("Exit app", close, True),
+        )
+        for index, (text, command, enabled) in enumerate(options):
+            row, column = divmod(index, 2)
+            body.rowconfigure(row, weight=1)
+            tk.Button(
+                body,
+                text=text,
+                command=command,
+                state="normal" if enabled else "disabled",
+                font=("Sans", 14, "bold"),
+                bg="#345269",
+                fg="white",
+                wraplength=max(120, width // 2 - 35),
+                relief="flat",
+                takefocus=False,
+            ).grid(row=row, column=column, sticky="nsew", padx=4, pady=4)
+        tk.Button(
+            dialog,
+            text="Done",
+            command=close_menu,
+            font=("Sans", 16, "bold"),
+            bg="#007b70",
+            fg="white",
+            height=2,
+            width=16,
+            takefocus=False,
+        ).pack(pady=12)
+        dialog.protocol("WM_DELETE_WINDOW", close_menu)
+
+    def toggle_review():
+        state["show_review"] = not state["show_review"]
+        refresh()
 
     def close():
         if state["closing"]:
             return
+        close_menu()
         state["closing"] = True
         worker.stopping.set()
         status.set("Closing camera and scale…")
-        enable_buttons()
+        refresh()
 
-    def button(text, command, color):
-        return tk.Button(
-            controls,
-            text=text,
-            command=command,
-            font=("Sans", font, "bold"),
-            bg=color,
-            fg="white",
-            disabledforeground="#a0acb4",
-            relief="flat",
-            width=16,
-            height=3,
-            padx=4,
-            pady=8,
-            wraplength=180,
-            takefocus=False,
-        )
-
-    empty_button = button("Capture empty station", lambda: submit("empty"), "#345269")
-    zero_button = button("Zero scale", lambda: submit("zero"), "#345269")
-    scan_button = button("Measure box", lambda: submit("scan"), "#007b70")
-    review_button = button("Marked result", toggle_review, "#345269")
-    for control, row, column in (
-        (empty_button, 0, 0),
-        (zero_button, 1, 0),
-        (scan_button, 0, 1),
-        (review_button, 1, 1),
-    ):
-        control.grid(row=row, column=column, padx=5, pady=4, sticky="nsew")
+    edit_button = tk.Button(
+        identity,
+        text="Edit",
+        command=edit_package,
+        font=("Sans", 12, "bold"),
+        bg="#345269",
+        fg="white",
+        height=2,
+        width=8,
+        takefocus=False,
+    )
+    edit_button.pack(side="right", padx=6, pady=4)
+    primary_button = tk.Button(
+        footer,
+        text="Capture empty station",
+        command=primary,
+        font=("Sans", font, "bold"),
+        bg="#007b70",
+        fg="white",
+        disabledforeground="#a0acb4",
+        relief="flat",
+        width=18,
+        height=3,
+        wraplength=220,
+        takefocus=False,
+    )
+    primary_button.grid(row=0, column=0, padx=5, sticky="nsew")
+    more_button = tk.Button(
+        footer,
+        text="More",
+        command=more,
+        font=("Sans", font, "bold"),
+        bg="#345269",
+        fg="white",
+        relief="flat",
+        width=8,
+        height=3,
+        takefocus=False,
+    )
+    more_button.grid(row=0, column=1, padx=5, sticky="nsew")
+    review_button = tk.Button(
+        root,
+        text="Marked result",
+        command=toggle_review,
+        font=("Sans", 12, "bold"),
+        bg="#345269",
+        fg="white",
+        height=2,
+        width=20,
+        takefocus=False,
+    )
     fallback_button = tk.Button(
         root,
         text="Measure dimensions only",
         command=lambda: submit("dimensions_only"),
-        font=("Sans", font, "bold"),
+        font=("Sans", 13, "bold"),
         bg="#805623",
         fg="white",
-        pady=8,
+        height=2,
         takefocus=False,
     )
     exit_button = tk.Button(
@@ -471,157 +436,180 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
     )
     exit_button.place(relx=1, x=-8, y=8, anchor="ne", width=56, height=56)
     root.protocol("WM_DELETE_WINDOW", close)
-    root.bind("<Escape>", lambda _: close())
-    enable_buttons()
+    root.bind("<Escape>", lambda event: close())
+
+    def resize(event):
+        if event.widget is not root:
+            return
+        width = max(180, event.width - 30)
+        for label in (headline_label, status_label, scale_label):
+            label.configure(wraplength=width)
+        package_label.configure(wraplength=max(140, width - 115))
+        primary_button.configure(wraplength=max(140, min(220, width - 160)))
+
+    root.bind("<Configure>", resize)
+    refresh()
     worker.start()
+
+    def load_review(path):
+        with Image.open(path) as image:
+            state["review"] = image.copy()
+        state["display_key"] = None
 
     def poll():
         try:
             while True:
                 event, payload = worker.events.get_nowait()
                 if event == "ready":
-                    state.update(ready=True, busy=False)
-                    status.set("Remove all boxes, then tap Capture empty station.")
-                elif event == "empty":
-                    state.update(empty=True, busy=False)
+                    state.update(ready=True, busy=False, phase="setup")
+                    status.set("Remove all boxes, then capture the empty station.")
+                elif event in ("empty", "zero", "next"):
+                    state.update(busy=False, pending=None, fallback=None, phase="label")
+                    if event == "empty":
+                        state["empty"] = True
+                    clear_result()
+                    if not state["empty"]:
+                        state["phase"] = "setup"
                     status.set(
-                        (payload or "Empty reference captured.") + " Place a box to measure."
+                        "Hold the barcode close and steady inside the guide. "
+                        "It reads automatically."
                     )
-                elif event == "zero":
-                    state["busy"] = False
-                    status.set(
-                        payload if state["empty"] else "Scale zeroed. Capture empty station next."
+                    if event == "empty" and payload and "Scale:" in payload:
+                        status.set(payload)
+                    if not state["empty"]:
+                        status.set(
+                            "Scale zeroed. Remove all boxes and capture the empty station next."
+                        )
+                elif event == "listening":
+                    state["listening"] = payload
+                elif event == "label":
+                    if state["closing"]:
+                        continue
+                    state.update(
+                        busy=False,
+                        pending=payload,
+                        phase="measure" if payload.get("package_id") else "choose",
                     )
+                    clear_result()
+                    if payload.get("package_id"):
+                        status.set(
+                            "Place this same box against both walls, hands off, "
+                            "then tap Measure box."
+                        )
+                        if payload.get("package_id_source") != "manual" and state[
+                            "beep_id"
+                        ] != payload.get("scan_id"):
+                            state["beep_id"] = payload.get("scan_id")
+                            state["confirm_until"] = time.monotonic() + 1.6
+                            with suppress(tk.TclError):
+                                barcode_chime(root.bell)
+                    else:
+                        status.set(
+                            "Several codes or an unusable ID were found. "
+                            "Choose or enter the package ID."
+                        )
+                elif event == "skip":
+                    state.update(busy=False, pending=None, phase="measure")
+                    status.set("Barcode skipped. Place the box in the corner and tap Measure box.")
                 elif event == "result":
                     result, path = payload
-                    state["pending_label"] = None
-                    state["result"] = result
-                    update_package()
-                    with Image.open(path) as im:
-                        state["review"] = im.copy()
-                    state["busy"] = False
-                    for key, value in result["dimensions_inches"].items():
-                        values[key].set(f"{value:.2f}″")
-                    weight = result.get("weight", {})
-                    if weight.get("pounds") is not None:
-                        values["weight"].set(f"{weight['pounds']:.2f} lb")
-                        note = "Dimensions and weight saved."
-                    else:
-                        values["weight"].set("—")
-                        note = "Dimensions-only result saved; weight unavailable."
+                    state.update(busy=False, pending=None, result=result, phase="result")
+                    load_review(path)
+                    for key in ("length", "width", "height"):
+                        value = result["dimensions_inches"].get(key)
+                        values[key].set("—" if value is None else f"{value:.2f}″")
+                    weight = result.get("weight", {}).get("pounds")
+                    values["weight"].set("—" if weight is None else f"{weight:.2f} lb")
+                    note = (
+                        "Dimensions and weight saved."
+                        if weight is not None
+                        else "Dimensions saved; weight unavailable."
+                    )
+                    movement = " ".join(result.get("station_movement_warnings", []))
                     heights = result.get("height_by_wall_inches", {})
                     if abs(heights.get("long", 0) - heights.get("short", 0)) > 0.25:
                         note += " Wall heights disagree; inspect marked result."
-                    warning = getattr(worker, "review_warning", "")
-                    movement = " ".join(result.get("station_movement_warnings", []))
-                    if movement:
-                        note += " " + movement
                     status.set(
-                        note + " " + warning
-                        if warning
-                        else note + " Replace the box and tap Measure box."
+                        " ".join(
+                            filter(None, (note, movement, getattr(worker, "review_warning", "")))
+                        )
                     )
-                elif event == "label_progress":
-                    if state["busy"]:
-                        status.set(payload)
-                elif event == "label":
-                    state.update(busy=False, pending_label=payload)
-                    update_package()
-                    if payload and payload.get("package_id"):
-                        status.set(
-                            "Label ready. Place this box in the corner, hands off, "
-                            "then tap Measure box."
-                        )
-                    elif payload:
-                        status.set(
-                            "Choose or enter an ID. For a retry, rest the box, avoid glare, "
-                            "tap the barcode, and Scan label again."
-                        )
-                    else:
-                        status.set(
-                            "Pending label cleared. Scan another label or measure without one."
-                        )
-                elif event == "label_error":
-                    state.update(busy=False, pending_label=None)
-                    update_package()
-                    status.set("Could not read label: " + payload[0])
                 elif event == "package_id":
                     result, path = payload
                     state.update(busy=False, result=result)
-                    with Image.open(path) as im:
-                        state["review"] = im.copy()
-                    update_package()
-                    warning = getattr(worker, "review_warning", "")
-                    status.set("Package ID saved with this scan. " + warning)
+                    load_review(path)
+                    status.set("Package ID saved. " + getattr(worker, "review_warning", ""))
                 elif event == "package_id_error":
                     state["busy"] = False
-                    status.set("Could not save package ID: " + payload[0])
+                    status.set("Could not save ID: " + payload[0])
+                elif event == "watch_error":
+                    state.update(busy=False, listening=False, phase="measure")
+                    status.set(payload + " Use More to enter an ID or retry.")
                 elif event in ("error", "weight_error", "zero_error"):
                     message, has_reference = payload
-                    state.update(busy=False, empty=has_reference)
+                    state.update(
+                        busy=False,
+                        empty=has_reference,
+                        phase="measure" if has_reference else "setup",
+                    )
                     clear_result()
-                    status.set(("Scale: " if event != "error" else "Could not measure: ") + message)
+                    status.set(message)
                     if event == "weight_error" and has_reference:
                         state["fallback"] = message
-                        status.set(message + " Retry with Measure box, or choose dimensions only.")
-                        fallback_button.pack(before=controls, pady=3)
+                        status.set(message + " Retry, or explicitly measure dimensions only.")
                 elif event == "fatal":
-                    state.update(ready=False, busy=False)
+                    state.update(ready=False, busy=False, listening=False, pending=None)
                     clear_result()
-                    status.set(
-                        "Camera stopped: " + payload + " Close other camera apps and reopen."
-                    )
+                    status.set("Camera stopped: " + payload + " Reopen the app.")
                 elif event == "closed" and state["closing"]:
                     root.destroy()
                     return
-                enable_buttons()
+                refresh()
         except queue.Empty:
             pass
         if state["closing"] and not worker.is_alive():
             root.destroy()
             return
+        # The saved weight appears only in the result cards; this is current scale state.
         scale = getattr(worker, "scale", None)
         if scale is not None:
             reading = scale.snapshot()
             weight = reading["pounds"]
             text = "—" if weight is None else f"{0 if abs(weight) < 0.005 else weight:.2f} lb"
-            live_weight.set(f"Live scale: {text} • {reading['message']}")
-            live_label.configure(fg="#71dcc4" if reading["stable"] else "#ffca78")
-        try:
-            frame = worker.frames.get_nowait()
-        except queue.Empty:
-            frame = None
-        if frame is not None:
-            state["live_frame"] = frame
-        image = state["review"] if state["show_review"] else state["live_frame"]
-        if image is not None:
+            live_weight.set(f"Scale: {text} · {display_text(reading['message'], 65)}")
+            scale_label.configure(fg="#71dcc4" if reading["stable"] else "#ffca78")
+        with suppress(queue.Empty):
+            state["live"] = worker.frames.get_nowait()
+        image = state["review"] if state["show_review"] else state["live"]
+        confirmed = state["phase"] == "measure" and time.monotonic() < state["confirm_until"]
+        if confirmed != (headline.get() == "Barcode read") and state["phase"] == "measure":
+            refresh()
+        key = (
+            id(image),
+            preview_frame.winfo_width(),
+            preview_frame.winfo_height(),
+            state["show_review"],
+            state["listening"],
+            confirmed,
+        )
+        if image is not None and key != state["display_key"]:
             image = image.copy()
             image.thumbnail(
                 (max(10, preview_frame.winfo_width()), max(10, preview_frame.winfo_height()))
             )
-            if not state["show_review"]:
-                state["preview_bounds"] = (
-                    (preview.winfo_width() - image.width) / 2,
-                    (preview.winfo_height() - image.height) / 2,
-                    image.width,
-                    image.height,
+            if not state["show_review"] and (state["listening"] or confirmed):
+                left, top, right, bottom = GUIDE
+                rectangle = (
+                    left * image.width,
+                    top * image.height,
+                    right * image.width,
+                    bottom * image.height,
                 )
-                if state["target_selected"]:
-                    from PIL import ImageDraw
-
-                    left, top, right, bottom = target_bounds(
-                        state["label_target"], width=0.12, height=0.16
-                    )
-                    rectangle = (
-                        left * image.width,
-                        top * image.height,
-                        right * image.width,
-                        bottom * image.height,
-                    )
-                    pen = ImageDraw.Draw(image)
-                    pen.rectangle(rectangle, outline="black", width=5)
-                    pen.rectangle(rectangle, outline="#41ffe0", width=2)
+                pen = ImageDraw.Draw(image)
+                pen.rectangle(rectangle, outline="black", width=5)
+                pen.rectangle(rectangle, outline="#71ffad" if confirmed else "#71dcc4", width=2)
             state["photo"] = ImageTk.PhotoImage(image)
+            state["display_key"] = key
             preview.configure(image=state["photo"])
         root.after(100, poll)
 

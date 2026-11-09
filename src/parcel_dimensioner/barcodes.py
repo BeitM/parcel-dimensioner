@@ -58,15 +58,25 @@ def decode_image(path: Path, *, outline=None, enhance=False):
     detected box contour and never substitutes the full image if it is missing.
     """
     try:
+        from PIL import Image
+
+        with Image.open(path) as source:
+            image = source.convert("RGB")
+    except Exception as exc:
+        return unavailable(f"Barcode image could not be read: {exc}")
+    return decode_frame(image, outline=outline, enhance=enhance)
+
+
+def decode_frame(image, *, outline=None, enhance=False):
+    """Decode an owned PIL frame without writing temporary images to disk."""
+    try:
         import zxingcpp
-        from PIL import Image, ImageOps
+        from PIL import ImageOps
     except ImportError:
         return unavailable("Install this project's [touchscreen] or [barcode] extra.")
     if outline is not None and len(outline) < 3:
-        return unavailable("No usable box outline; enter the package ID manually.")
+        return unavailable("No usable label region; enter the package ID manually.")
     try:
-        with Image.open(path) as source:
-            image = source.convert("RGB")
         width, height = image.size
         identity = ((1, 0, 0), (0, 1, 0), (0, 0, 1))
         if enhance:

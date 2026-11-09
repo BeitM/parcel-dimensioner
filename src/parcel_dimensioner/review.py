@@ -151,6 +151,8 @@ def save_scan_review(folder: Path, result: dict):
         heading = "Package ID: not selected - choose a barcode or enter an ID"
     elif barcode.get("status") == "not_found":
         heading = "No barcode found - package ID not entered"
+    elif barcode.get("status") == "skipped":
+        heading = "Barcode skipped - package ID not entered"
     else:
         heading = "Barcode unavailable - package ID not entered"
     lines = [
