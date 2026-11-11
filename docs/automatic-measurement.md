@@ -69,15 +69,15 @@ On Windows, install with `python -m pip install -e ".[vision]"`, then use
 3. Rectify each empty wall view and find the transition from the white lower
    margin to the colored platform. Intersect the two floor lines to locate the
    floor corner. Border widths do not have to match.
-4. Normalize modest brightness changes and segment the occupied-versus-empty
-   difference within a region derived from the boards. Find a changed contour
+4. Normalize modest brightness changes using the wall area and segment the
+   occupied-versus-empty difference across the image. Find a changed contour
    that overlaps both wall views. Large competing candidates are rejected.
-5. Locate dominant horizontal contact edges in each wall's coordinates. Infer
-   the rear vertical joint from the floor point and the two grids' vertical
-   directions, then intersect each top edge with that joint.
-6. Average the rear top detections, find the outer contact-edge endpoints on
-   the contour, and convert wall-coordinate spans into inches. Each wall also
-   supplies a separate floor-to-top height.
+5. Find candidate horizontal contact edges in each wall's coordinates and pick
+   a supported pair whose heights agree within a quarter inch.
+6. Trace each outer side across several heights to locate its vertical boundary.
+   Intersect the side boundary with the selected top edge and check the photo
+   for contrast along both arms of the corner. Measure the wall-coordinate span
+   from the rear joint to that corner. Average the two floor-to-top heights.
 
 The board layouts are currently specific to this project: `DICT_6X6_1000`,
 non-legacy ChArUco, long wall 15 by 11 squares with IDs 0–81, short wall 11 by 15
@@ -107,8 +107,9 @@ cannot correctly measure arbitrary edges floating away from those planes.
 - A camera/wall shift of more than 3 pixels at the 95th percentile of common
   detected corners is rejected. Smaller motion can still affect measurements.
   Matching resolution alone does not establish matching focus or lens crop.
-- A warning is included when the two height estimates differ by more than
-  0.25 inch. Agreement between estimates does not prove accuracy.
+- Scans with no matching top edges or an unverified wall-contact corner ask for
+  a retry. A front corner outside the image can still produce a result when
+  the required wall-contact edges and corners are visible.
 - No live measurement loop, touchscreen measurement UI, barcode, or scale is
   added by this command. Existing preview and capture commands still operate
   separately.

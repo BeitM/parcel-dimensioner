@@ -233,17 +233,14 @@ def _changed_contour(empty, occupied, walls, square, cv, np):
     return candidates[0], mask
 
 
+def _inside_frame(points, shape, np):
+    # Blur/morphology can move the artificial frame boundary a few pixels inward.
+    return np.all((points >= 5) & (points < np.array(shape[1::-1]) - 5), axis=-1)
+
+
 def _visible_outline(contour, shape, cv, np):
     """Split a clipped contour into open paths; never draw along the frame edge."""
-    height, width = shape[:2]
-    points = contour[:, 0, :]
-    # Blur/morphology can move the artificial frame boundary a few pixels inward.
-    visible = (
-        (points[:, 0] >= 5)
-        & (points[:, 0] < width - 5)
-        & (points[:, 1] >= 5)
-        & (points[:, 1] < height - 5)
-    )
+    visible = _inside_frame(contour[:, 0, :], shape, np)
     complete = bool(visible.all())
     if complete:
         segments = [cv.approxPolyDP(contour, 1.0, True).reshape(-1, 2).tolist()]
@@ -265,20 +262,132 @@ def _visible_outline(contour, shape, cv, np):
     return contour[visible], contour[~visible], segments, complete
 
 
-def _top_line(contour, wall, cv, np):
-    xy = _project(contour, wall["inverse"], cv, np)
+def _top_candidates(xy, wall, floor_y, square, np):
+    """Keep alternate rows when a reflection or a gap splits the outline."""
     on_wall = (
         (xy[:, 0] > 0) & (xy[:, 0] < wall["width"]) & (xy[:, 1] > 0) & (xy[:, 1] < wall["height"])
     )
     points = xy[on_wall]
     histogram, edges = np.histogram(points[:, 1], np.arange(0, wall["height"] + 2, 2))
-    peak = int(np.argmax(histogram))
-    y = edges[peak] + 1
-    support = points[abs(points[:, 1] - y) < 5]
-    if len(support) < 20 or np.ptp(support[:, 0]) < wall["width"] / wall["spec"].columns:
-        raise MeasurementError("Cannot isolate a straight top edge against each wall.")
-    y = float(np.median(support[:, 1]))
-    return _image_line(wall, y, cv, np), y
+    candidates = []
+    for peak in np.argsort(-histogram, kind="stable"):
+        if histogram[peak] == 0 or len(candidates) == 8:
+            break
+        support = points[abs(points[:, 1] - (edges[peak] + 1)) < 5]
+        if len(support) < 20 or np.ptp(support[:, 0]) < square:
+            continue
+        height = float(floor_y - np.median(support[:, 1]))
+        if height > 10 and all(abs(height - existing) > 4 for existing, _ in candidates):
+            candidates.append((height, int(histogram[peak])))
+    return candidates
+
+
+def _side_span(outline, visible_segments, height, np):
+    """Find the outer vertical boundary across the box side in wall millimeters."""
+    following = np.roll(outline, -1, axis=0)
+    x, y = outline.T
+    next_x, next_y = following.T
+    levels = np.linspace(max(2, height * 0.12), height * 0.88, 40)
+    profile = []
+    for level in levels:
+        crosses = (y > level) != (next_y > level)
+        if crosses.any():
+            position = (level - y[crosses]) / (next_y[crosses] - y[crosses])
+            spans = x[crosses] + position * (next_x[crosses] - x[crosses])
+            outer = int(np.argmax(spans))
+            if visible_segments[crosses][outer]:
+                profile.append(float(spans[outer]))
+    spans = np.asarray(profile)
+    if len(spans) <= len(levels) / 2:
+        return None
+    # Use the span that persists down the side. A single spur at the top or
+    # a short notch in the outline cannot define the end of the lid.
+    neighbors = abs(spans[:, None] - spans) <= 4
+    support = neighbors[np.argmax(neighbors.sum(axis=1))]
+    if support.sum() <= len(levels) / 2:
+        return None
+    return float(np.median(spans[support]))
+
+
+def _corner_supported(image, wall, origin, axes, span, height, cv, np):
+    """Check image contrast along both arms of the predicted corner."""
+
+    def pixels(points):
+        px = _project(origin + points * axes, wall["matrix"], cv, np)
+        rgb = cv.remap(image, px[:, 0][None], px[:, 1][None], cv.INTER_LINEAR)[0].astype(float)
+        return rgb, _inside_frame(px, image.shape, np)
+
+    def has_edge(points, axis, minimum):
+        # Sample on both sides of a line, allowing a few millimeters for
+        # the outline's pixel rounding and the fitted wall's small residuals.
+        step = np.zeros(2)
+        step[axis] = 3
+        for offset in (0, -4, 4):
+            shifted = points + (offset / 3) * step
+            a, visible_a = pixels(shifted + step)
+            b, visible_b = pixels(shifted - step)
+            contrast = np.max(abs(a - b), axis=1)
+            if np.count_nonzero((contrast >= 14) & visible_a & visible_b) >= minimum:
+                return True
+        return False
+
+    along_top = np.linspace(span - min(40, span * 0.35), span - 4, 24)
+    down_side = np.linspace(height - min(28, height * 0.6), height - 3, 24)
+    return has_edge(np.column_stack((along_top, np.full(24, height))), 1, 4) and has_edge(
+        np.column_stack((np.full(24, span), down_side)), 0, 8
+    )
+
+
+def _wall_edges(image, walls, floor_lines, floor, visible, clipped, contour, square, cv, np):
+    options = [
+        _top_candidates(_project(visible, wall["inverse"], cv, np), wall, floor_y, square, np)
+        for wall, (_, floor_y) in zip(walls, floor_lines, strict=True)
+    ]
+    matches = [
+        (left_score * right_score, left_height, right_height)
+        for left_height, left_score in options[0]
+        for right_height, right_score in options[1]
+        if abs(left_height - right_height) <= 6.35  # quarter inch
+    ]
+    if not matches:
+        raise MeasurementError(
+            "Cannot find top edges at the same height on both walls. "
+            "Seat the box against both walls and try again."
+        )
+    _, *heights = max(matches, key=lambda match: match[0])
+    inside = _inside_frame(contour[:, 0, :], image.shape, np)
+    visible_segments = inside & np.roll(inside, -1)
+    cut_off = (
+        "A required top edge against a wall is cut off by the camera image. "
+        "Keep both rear top edges and their end corners visible."
+    )
+    sides, ends, rear_by_wall = [], [], []
+    for wall, (_, floor_y), height in zip(walls, floor_lines, heights, strict=True):
+        top = _image_line(wall, floor_y - height, cv, np)
+        if np.any(abs(clipped[:, 0, :] @ top[:2] + top[2]) < 6):
+            raise MeasurementError(cut_off)
+        origin = _project([floor], wall["inverse"], cv, np)[0]
+        origin[1] = floor_y
+        axes = np.array([1 if wall["spec"].name == "long" else -1, -1])
+        outline = (_project(contour, wall["inverse"], cv, np) - origin) * axes
+        span = _side_span(outline, visible_segments, height, np)
+        corner_error = (
+            f"Cannot verify the box corner on the {wall['spec'].name} wall. "
+            "Check that the box touches both walls and its top corners are clear, then retry."
+        )
+        if span is None or span <= 10:
+            raise MeasurementError(corner_error)
+        rear, end = _project(
+            origin + np.array([[0, height], [span, height]]) * axes, wall["matrix"], cv, np
+        )
+        if not _inside_frame(end, image.shape, np):
+            raise MeasurementError(cut_off)
+        if not _corner_supported(image, wall, origin, axes, span, height, cv, np):
+            raise MeasurementError(corner_error)
+        rear_by_wall.append(rear)
+        ends.append(end)
+        sides.append(span)
+    return sides, heights, ends, rear_by_wall
 
 
 def measure_pair(
@@ -362,49 +471,10 @@ def measure_pair(
     visible, clipped, outline_segments, outline_complete = _visible_outline(
         contour, box.shape, cv, np
     )
-    top_lines = [_top_line(visible, w, cv, np)[0] for w in walls]
-    # Missing front corners are allowed. A frame boundary through either of the
-    # two wall-contact top edges would shorten a measured dimension, however.
-    if any(np.any(abs(clipped[:, 0, :] @ line[:2] + line[2]) < 6) for line in top_lines):
-        raise MeasurementError(
-            "A required top edge against a wall is cut off by the camera image. "
-            "Keep both rear top edges and their end corners visible."
-        )
-    verticals = []
-    for wall in walls:
-        xy = _project([floor], wall["inverse"], cv, np)[0]
-        above = _project([(xy[0], xy[1] - square_mm)], wall["matrix"], cv, np)[0]
-        line = np.cross([*floor, 1], [*above, 1])
-        line /= np.linalg.norm(line[:2])
-        if verticals and line @ verticals[0] < 0:
-            line = -line
-        verticals.append(line)
-    seam = np.mean(verticals, axis=0)
-    rear_by_wall = [_intersection(line, seam, np) for line in top_lines]
+    sides, heights, ends, rear_by_wall = _wall_edges(
+        box, walls, floor_lines, floor, visible, clipped, contour, square_mm, cv, np
+    )
     rear = np.mean(rear_by_wall, axis=0)
-    sides, heights, ends = [], [], []
-    for wall, line, (_, floor_y), own_rear in zip(
-        walls, top_lines, floor_lines, rear_by_wall, strict=True
-    ):
-        distances = abs(visible[:, 0, :] @ line[:2] + line[2])
-        close = visible[:, 0, :][distances < 4]
-        if len(close) < 10:
-            raise MeasurementError("Not enough support for the detected box top edge.")
-        coordinates = _project(close, wall["inverse"], cv, np)
-        rear_xy = _project([rear], wall["inverse"], cv, np)[0]
-        # Side away from the joint follows this board's grid X axis.
-        direction = 1 if wall["spec"].name == "long" else -1
-        spans = direction * (coordinates[:, 0] - rear_xy[0])
-        index = int(np.argmax(spans))
-        end = close[index].astype(float)
-        end -= (end @ line[:2] + line[2]) * line[:2]
-        end_xy = _project([end], wall["inverse"], cv, np)[0]
-        sides.append(float(direction * (end_xy[0] - rear_xy[0])))
-        own_rear_xy = _project([own_rear], wall["inverse"], cv, np)[0]
-        heights.append(float(floor_y - own_rear_xy[1]))
-        ends.append(end)
-    if min(*sides, *heights) <= 10:
-        raise MeasurementError("Detected dimensions are implausible; inspect the image pair.")
     if np.linalg.norm(floor - rear) < 5:
         raise MeasurementError("Box height is too small to resolve in this view.")
     warnings = [
@@ -417,8 +487,6 @@ def measure_pair(
     if not outline_complete:
         outline_warnings.append("Partial outline; inspect marked result.")
         warnings.extend(outline_warnings)
-    if abs(heights[0] - heights[1]) > 6.35:
-        warnings.append("Wall height estimates disagree by more than 0.25 inch.")
     dimensions = {
         "length": max(sides) / 25.4,
         "width": min(sides) / 25.4,

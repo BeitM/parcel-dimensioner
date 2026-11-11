@@ -554,9 +554,6 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
                     )
                     movement = " ".join(result.get("station_movement_warnings", []))
                     outline = " ".join(result.get("outline_warnings", []))
-                    heights = result.get("height_by_wall_inches", {})
-                    if abs(heights.get("long", 0) - heights.get("short", 0)) > 0.25:
-                        note += " Wall heights disagree; inspect marked result."
                     status.set(
                         " ".join(
                             filter(

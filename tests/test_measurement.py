@@ -110,6 +110,56 @@ def test_no_box_is_rejected(tmp_path):
         measure_pair(empty, empty)
 
 
+@pytest.mark.parametrize("hide_corner", [False, True])
+def test_incomplete_outline_requires_a_supported_corner(tmp_path, monkeypatch, hide_corner):
+    from parcel_dimensioner import measurement
+
+    empty, box = render_station(tmp_path, (230, 200, 100))
+    changed_contour = measurement._changed_contour
+
+    def incomplete_outline(reference, occupied, walls, square, cv, np):
+        contour, mask = changed_contour(reference, occupied, walls, square, cv, np)
+        wall = walls[1]
+        # These coordinates follow the rendered short wall in render_station.
+        seam_x, top_y = wall["width"] + 17, wall["height"] + 12 - 100
+
+        def patch(left, right, above, below):
+            return np.int32(
+                measurement._project(
+                    [
+                        (seam_x - x, top_y + y)
+                        for x, y in ((left, above), (right, above), (right, below), (left, below))
+                    ],
+                    wall["matrix"],
+                    cv,
+                    np,
+                )
+            )
+
+        # Simulate the change mask dropping part of the top where the lid
+        # blends with the background. The side below the gap still shows.
+        mask = np.zeros_like(mask)
+        cv.drawContours(mask, [contour], -1, 255, cv.FILLED)
+        cv.fillConvexPoly(mask, patch(75, 255, -5, 30), 0)
+        contours, _ = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE)
+        if hide_corner:
+            # The outline can still look plausible when the raw corner is
+            # obscured. Remove the local edge contrast used to verify it.
+            cv.fillConvexPoly(occupied, patch(174, 260, -14, 14), (90, 90, 90))
+        return max(contours, key=cv.contourArea), mask
+
+    monkeypatch.setattr(measurement, "_changed_contour", incomplete_outline)
+    output = tmp_path / "review"
+    if hide_corner:
+        with pytest.raises(MeasurementError, match="Cannot verify the box corner"):
+            save_measurement(empty, box, output)
+        assert not output.exists()
+        return
+    result = save_measurement(empty, box, output)
+    for name, mm in zip(("length", "width", "height"), (230, 200, 100), strict=True):
+        assert result["dimensions_inches"][name] * 25.4 == pytest.approx(mm, abs=8)
+
+
 @pytest.mark.parametrize("physical", [(400, 330, 65), (450, 360, 65)])
 def test_large_box_outline_includes_front_beyond_projected_walls(tmp_path, physical):
     empty, box = render_station(tmp_path, physical)
