@@ -26,6 +26,40 @@ def test_box_lines_are_thick_and_do_not_modify_source():
     assert marked[400, 627].tolist() == [0, 0, 0]  # Gap between inferred dashes.
 
 
+def test_partial_green_outline_does_not_close_across_missing_front():
+    cv = pytest.importorskip("cv2")
+    np = pytest.importorskip("numpy")
+    from parcel_dimensioner.review import draw_box_review
+
+    image = np.zeros((400, 600, 3), np.uint8)
+    result = {
+        "box_outline_complete": False,
+        "box_contour_pixels": [[100, 399], [100, 100], [500, 100], [500, 399]],
+        "box_contour_segments_pixels": [[[100, 300], [100, 100], [500, 100], [500, 300]]],
+    }
+    marked = draw_box_review(image, result, cv, np)
+    assert marked[100, 300].tolist() == [70, 230, 70]
+    assert marked[300, 300].tolist() == [0, 0, 0]  # No line joining the two open ends.
+    assert marked[399, 300].tolist() == [0, 0, 0]  # No artificial frame-edge outline.
+
+
+def test_box_detail_zooms_to_native_outline_and_retains_context():
+    image = pytest.importorskip("PIL.Image")
+    from parcel_dimensioner.review import box_detail
+
+    source = image.new("RGB", (4608, 2592), "white")
+    source.putpixel((2400, 1800), (255, 0, 0))
+    result = {"box_contour_pixels": [[2000, 1500], [2800, 1500], [2800, 2591], [2000, 2591]]}
+    detail = box_detail(source, result)
+    assert 800 < detail.width < 2000
+    assert 1091 < detail.height < 1800
+    assert detail.getbbox() == (0, 0, detail.width, detail.height)
+    assert source.size == (4608, 2592)
+    assert detail.getextrema()[1] == (0, 255)  # The box's reference pixel remains in the crop.
+    # A crop with a missing front corner stays within the actual source image.
+    assert detail.getpixel((0, detail.height - 1)) == (255, 255, 255)
+
+
 def test_barcode_review_highlights_candidates_and_refreshes_id(tmp_path):
     image = pytest.importorskip("PIL.Image")
     np = pytest.importorskip("numpy")

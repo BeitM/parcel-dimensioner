@@ -3,7 +3,7 @@
 The app automatically watches for a barcode after station setup. Hold the box
 close to the camera with its barcode facing the lens and inside the guide.
 There is no Scan label button or required tap on the preview. A successful read
-locks the ID, gives a green **Barcode read** confirmation, and plays a short
+locks the displayed ID, enables the green **Measure box** button, and plays a short
 chime through the configured audio output, when available.
 
 Then place that same box against both station walls and tap **Measure box**.
@@ -32,12 +32,14 @@ bell. The visible green confirmation remains available regardless of audio.
 2. Hold the label close and steady in the guide. The camera continually adjusts
    focus while an independent worker decodes frames. Make the barcode large
    enough to show distinct bars and avoid reflections. No capture button is needed.
-3. Wait for **Barcode read**, check the displayed ID, then move the box into the
+3. Wait for the enabled green **Measure box** button and optional chime,
+   check the displayed ID, then move the box into the
    corner. Reading pauses as soon as a label is accepted; subsequent barcodes
    cannot replace the held ID.
 4. Tap **Measure box**, hands off. The camera returns to its normal locked focus
-   before capturing dimensions and verifying stable weight. Inspect **Marked
-   result** if needed; the barcode is highlighted in its separate label photo.
+   before capturing dimensions and verifying stable weight. A closer marked box
+   view opens automatically. **Full result** shows the complete review including
+   the highlighted label; the same button then offers **Live view** and **Box detail**.
 5. Remove the box, then tap **Next box** to clear the completed result and start
    listening again. This deliberate rearm prevents a previous ID carrying over.
    Identical product UPCs may be read again for a deliberately started new box.
@@ -68,9 +70,12 @@ change a different scan. The editor includes the existing touch keyboard.
   **one completed request**, then releases it. The decoder never owns a camera
   request or accesses Picamera2. Saved barcode evidence belongs to the exposure
   that produced its ID, rather than a later photograph of a moving package.
-- The decoder first tries the small image. If needed, it tries the original
-  full-resolution image with cropped, contrast-adjusted, and straightened views.
-  One frame is offered at most every 0.4 seconds. Queues hold only the latest
+- The decoder first tries a grayscale crop around the guide in the small image.
+  If needed, the full-resolution guide crop is tried at half size, native size,
+  then with sharpening/local contrast and perspective recovery. Passes stop
+  after one succeeds, retaining all distinct valid candidates from that pass.
+  Quiet-zone padding is retained; all coordinates map back to the source image.
+  One frame is offered at most every 0.2 seconds. Queues hold only the latest
   waiting frame; preview and scale updates run independently of decoding.
 - Candidate centers must be inside the guide and the barcode's longest edge
   must span at least 10% of the source width. This deliberately favors a label
@@ -85,7 +90,8 @@ change a different scan. The editor includes the existing touch keyboard.
 - No photograph is written for ordinary unsuccessful live frames. One accepted
   source image is persisted with its metadata. Decoder errors pause listening
   with an explanation and allow manual entry or an explicit barcode skip.
-- Continuous autofocus, optional full focus range, and an automatic exposure
+- Continuous autofocus matched to the visible guide, optional fast search and
+  full focus range, and an automatic exposure
   mode favoring short shutters are used only during label listening. Normal
   metering, exposure settings, and locked station focus are restored and checked
   before measurement. Focus-window arguments use numeric tuples, as required by
@@ -105,7 +111,9 @@ values/formats, original-image polygons, raw byte encodings, selected index,
 package ID/source, and timestamped ID history. The associated measurement copies
 that evidence alongside `box.jpg` and its combined top-level `result.json`.
 
-**Marked result** displays the box guides and a separate highlighted label
+The default marked view zooms to the box with nearby wall/floor context. It is
+display-only and does not change detection inputs or saved image coordinates.
+**Full result** displays the box guides and a separate highlighted label
 picture, plus the selected package ID. Label coordinates are never drawn on the
 station image. Editing the ID refreshes the review. Fit/shift diagnostics and
 the change mask use processing-image pixels; box guides and barcode polygons

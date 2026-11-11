@@ -148,6 +148,7 @@ class StationWorker(threading.Thread):
                                     )
                                 )
                             else:
+                                self.events.put(("label_detected", None))
                                 result = session.accept_live_label(frame, barcode)
                                 suspend()
                                 self.events.put(("label", result))
@@ -160,7 +161,7 @@ class StationWorker(threading.Thread):
                     preview = frame.preview
                     if offer:
                         watch.offer(frame)
-                        next_frame = now + 0.4
+                        next_frame = now + 0.2
                 else:
                     preview = camera.preview()
                 preview = preview.copy()

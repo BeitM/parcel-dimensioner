@@ -25,6 +25,7 @@ def camera(monkeypatch):
         AfMeteringEnum=SimpleNamespace(Auto=0, Windows=1),
         AeExposureModeEnum=SimpleNamespace(Normal=0, Short=1),
         AfRangeEnum=SimpleNamespace(Normal=0, Full=2),
+        AfSpeedEnum=SimpleNamespace(Normal=0, Fast=1),
     )
     monkeypatch.setitem(
         sys.modules, "libcamera", SimpleNamespace(controls=controls, Rectangle=Rectangle)
@@ -42,6 +43,7 @@ def camera(monkeypatch):
             "AeExposureMode": (0, 2, 0),
             "ExposureValue": (-8, 8, 0),
             "AfRange": (0, 2, 0),
+            "AfSpeed": (0, 1, 0),
         }
         camera_properties: ClassVar = {"ScalerCropMaximum": [0, 0, 4608, 2592]}
 
@@ -180,13 +182,15 @@ def test_continuous_label_focus_restores_station_before_measurement(camera):
     wrapper.start_label_focus()
     assert camera.requests[-1]["AfMode"] == 2
     assert camera.requests[-1]["AfRange"] == 2
-    assert camera.windows[0].values == (1382, 648, 1843, 1296)
+    assert camera.requests[-1]["AfSpeed"] == 1
+    assert camera.windows[0].values == (1106, 570, 2396, 1452)
     camera.metadata["LensPosition"] = 7.0
     wrapper.stop_label_focus()
     assert not wrapper.listening
     assert camera.metadata["LensPosition"] == 1.0
     assert camera.requests[-2]["ExposureValue"] == 0
     assert camera.requests[-2]["AeExposureMode"] == 0
+    assert camera.requests[-2]["AfSpeed"] == 0
 
 
 def test_continuous_focus_restore_failure_blocks_capture(camera, tmp_path):

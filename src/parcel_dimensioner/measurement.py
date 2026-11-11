@@ -191,6 +191,9 @@ def _changed_contour(empty, occupied, walls, square, cv, np):
                 np,
             )
         )
+    # The projected walls locate unchanged pixels for exposure matching only.
+    # Their extension below the grids is not a platform boundary: clipping the
+    # foreground to it invents a straight edge through larger packages.
     roi = np.zeros(empty.shape[:2], np.uint8)
     cv.fillConvexPoly(roi, cv.convexHull(np.int32(footprint)), 255)
     bg, fg = empty.astype(np.float32), occupied.astype(np.float32)
@@ -201,7 +204,7 @@ def _changed_contour(empty, occupied, walls, square, cv, np):
             raise MeasurementError("The image pair has too little unchanged background.")
         fg[:, :, channel] *= np.median(a[stable] / np.maximum(b[stable], 1))
     delta = np.max(abs(cv.GaussianBlur(bg, (5, 5), 0) - cv.GaussianBlur(fg, (5, 5), 0)), axis=2)
-    mask = ((delta > 35) & (roi > 0)).astype(np.uint8) * 255
+    mask = (delta > 35).astype(np.uint8) * 255
     mask = cv.morphologyEx(mask, cv.MORPH_OPEN, np.ones((5, 5), np.uint8))
     mask = cv.morphologyEx(mask, cv.MORPH_CLOSE, np.ones((9, 9), np.uint8))
     contours, _ = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE)
@@ -228,6 +231,38 @@ def _changed_contour(empty, occupied, walls, square, cv, np):
     if len(candidates) > 1 and cv.contourArea(candidates[1]) > 0.5 * cv.contourArea(candidates[0]):
         raise MeasurementError("Multiple large changes found; clear the station and recapture.")
     return candidates[0], mask
+
+
+def _visible_outline(contour, shape, cv, np):
+    """Split a clipped contour into open paths; never draw along the frame edge."""
+    height, width = shape[:2]
+    points = contour[:, 0, :]
+    # Blur/morphology can move the artificial frame boundary a few pixels inward.
+    visible = (
+        (points[:, 0] >= 5)
+        & (points[:, 0] < width - 5)
+        & (points[:, 1] >= 5)
+        & (points[:, 1] < height - 5)
+    )
+    complete = bool(visible.all())
+    if complete:
+        segments = [cv.approxPolyDP(contour, 1.0, True).reshape(-1, 2).tolist()]
+    else:
+        # Start just after a gap so a path wrapping around index zero stays joined.
+        start = int(np.flatnonzero(~visible)[0]) + 1
+        ordered = np.roll(contour, -start, axis=0)
+        flags = np.roll(visible, -start)
+        segments, run = [], []
+        for point, inside in zip(ordered, flags, strict=True):
+            if inside:
+                run.append(point)
+            else:
+                if len(run) >= 2:
+                    segments.append(
+                        cv.approxPolyDP(np.asarray(run), 1.0, False).reshape(-1, 2).tolist()
+                    )
+                run = []
+    return contour[visible], contour[~visible], segments, complete
 
 
 def _top_line(contour, wall, cv, np):
@@ -324,7 +359,17 @@ def measure_pair(
     floor_lines = [_floor_line(empty, w, square_mm, cv, np) for w in walls]
     floor = _intersection(floor_lines[0][0], floor_lines[1][0], np)
     contour, mask = _changed_contour(empty, box, walls, square_mm, cv, np)
-    top_lines = [_top_line(contour, w, cv, np)[0] for w in walls]
+    visible, clipped, outline_segments, outline_complete = _visible_outline(
+        contour, box.shape, cv, np
+    )
+    top_lines = [_top_line(visible, w, cv, np)[0] for w in walls]
+    # Missing front corners are allowed. A frame boundary through either of the
+    # two wall-contact top edges would shorten a measured dimension, however.
+    if any(np.any(abs(clipped[:, 0, :] @ line[:2] + line[2]) < 6) for line in top_lines):
+        raise MeasurementError(
+            "A required top edge against a wall is cut off by the camera image. "
+            "Keep both rear top edges and their end corners visible."
+        )
     verticals = []
     for wall in walls:
         xy = _project([floor], wall["inverse"], cv, np)[0]
@@ -341,8 +386,8 @@ def measure_pair(
     for wall, line, (_, floor_y), own_rear in zip(
         walls, top_lines, floor_lines, rear_by_wall, strict=True
     ):
-        distances = abs(contour[:, 0, :] @ line[:2] + line[2])
-        close = contour[:, 0, :][distances < 4]
+        distances = abs(visible[:, 0, :] @ line[:2] + line[2])
+        close = visible[:, 0, :][distances < 4]
         if len(close) < 10:
             raise MeasurementError("Not enough support for the detected box top edge.")
         coordinates = _project(close, wall["inverse"], cv, np)
@@ -368,6 +413,10 @@ def measure_pair(
         "Silhouette thresholds can include shadows/reflections or miss low-contrast box edges.",
     ]
     warnings.extend(movement_warnings)
+    outline_warnings = []
+    if not outline_complete:
+        outline_warnings.append("Partial outline; inspect marked result.")
+        warnings.extend(outline_warnings)
     if abs(heights[0] - heights[1]) > 6.35:
         warnings.append("Wall height estimates disagree by more than 0.25 inch.")
     dimensions = {
@@ -438,7 +487,12 @@ def measure_pair(
             "wall_top_ends": [p.tolist() for p in ends],
             "rear_top_by_wall": [p.tolist() for p in rear_by_wall],
         },
+        # The clipped region polygon remains useful for barcode filtering.
+        # Drawing uses the visible paths below, which never join across a gap.
         "box_contour_pixels": cv.approxPolyDP(contour, 1.0, True).reshape(-1, 2).tolist(),
+        "box_outline_complete": outline_complete,
+        "box_contour_segments_pixels": outline_segments,
+        "outline_warnings": outline_warnings,
         "box_edges_pixels": review_edges,
         "wall_fit_rms_pixels": {w["spec"].name: w["fit_rms_pixels"] for w in walls},
         "wall_shift_p95_pixels": dict(zip((s.name for s in BOARDS), shifts, strict=True)),
@@ -458,6 +512,9 @@ def measure_pair(
         for key, value in result["points_pixels"].items()
     }
     result["box_contour_pixels"] = (np.asarray(result["box_contour_pixels"]) * factors).tolist()
+    result["box_contour_segments_pixels"] = [
+        (np.asarray(segment) * factors).tolist() for segment in outline_segments
+    ]
     for edge in result["box_edges_pixels"]:
         for key in ("start", "end"):
             edge[key] = (np.asarray(edge[key]) * factors).tolist()

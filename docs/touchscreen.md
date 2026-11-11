@@ -8,7 +8,8 @@ API is needed. The desktop launcher opens this app; it does not start on boot.
 The current camera defaults are 4608 x 2592 for the Camera Module 3 Wide. Barcode
 decoding reads the full saved photo; dimensions use a smaller working copy of
 the same exposure and map the detected outline back to full-size coordinates.
-The live view uses a separate 800 x 450 stream. Existing custom camera TOMLs can
+Live decoding uses a separate 1280 x 720 stream, displayed at up to 800 x 450.
+Existing custom camera TOMLs can
 override this default; see [the full-resolution trial](barcodes.md).
 
 ## Transfer the changes from the laptop
@@ -79,7 +80,8 @@ at startup and locks that position; keep the wall patterns clearly visible.
    the image reference; the app explains that weight is unavailable.
 3. Hold the barcode close to the camera and steady inside the guide. Reading
    and focusing happen automatically, without tapping the preview or a Scan
-   label button. Wait for the green **Barcode read** message and optional chime.
+   label button. Wait for the displayed ID, enabled green **Measure box** button,
+   and optional chime.
    Check the displayed ID. Multiple distinct codes require **Choose ID**.
    The app then pauses reading and restores normal station focus/exposure.
 4. Put that same box snugly against both walls and remove your hands. Tap
@@ -94,8 +96,10 @@ at startup and locks that position; keep the wall patterns clearly visible.
    and operation](barcodes.md) for details and label tests.
    Measurement cards appear only after a result. The smaller scale status is a
    current reading during the first two steps; removing a box does not change
-   its saved weight. Tap **Marked result** to inspect the chosen points,
-   then **Live view** to return to the camera. Results are saved automatically.
+   its saved weight. The marked box detail opens automatically, zoomed with
+   surrounding wall context. Tap **Full result** to see the full review and label,
+   then **Live view** to return to the camera, or **Box detail** to zoom again.
+   Results are saved automatically; this zoom only changes the display.
 6. Remove the box and tap **Next box** to rearm barcode reading for the next
    package. The completed ID is cleared. No automatic replacement or carryover
    is allowed. A new empty image is not needed
@@ -129,10 +133,17 @@ Images and results stay on the Pi under
 `data/captures/station-<time>-<id>/`. Each empty capture has its own JPEG and JSON
 metadata. Each scan gets a numbered folder with `box.jpg`, capture metadata,
 `review/result.json`, `review/measurement.jpg`, and `review/change-mask.png`.
-**Marked result** displays `review/scan.jpg`, which combines thicker box outlines,
+**Full result** displays `review/scan.jpg`, which combines thicker box outlines,
 measurement guides, barcode highlights, and the selected/manual package ID.
 Green is the detected boundary, yellow is the measured top edges, and blue dashed
-lines are inferred cuboid edges. Selected barcode regions are pink; other
+lines are inferred cuboid edges. The green boundary is traced across the full
+camera image, including the platform in front of the walls. Front corners may
+extend outside the image if both top edges against the walls and their end
+corners remain visible. The app then saves dimensions with a partial-outline
+notice, and the green paths stop at the frame instead of joining across the box.
+A required wall-contact top edge cut off by the frame blocks measurement.
+If you reposition the camera, capture a new empty station afterward.
+Selected barcode regions are pink; other
 decoded candidates are orange. The ID and barcode values are listed below the
 image. Editing an ID refreshes this review, including while it is being viewed.
 The scan's **top-level `result.json`** contains dimensions AND weight (or the

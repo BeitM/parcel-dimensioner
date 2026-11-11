@@ -110,6 +110,73 @@ def test_no_box_is_rejected(tmp_path):
         measure_pair(empty, empty)
 
 
+@pytest.mark.parametrize("physical", [(400, 330, 65), (450, 360, 65)])
+def test_large_box_outline_includes_front_beyond_projected_walls(tmp_path, physical):
+    empty, box = render_station(tmp_path, physical)
+    result, _, mask = measure_pair(empty, box)
+    # The physical package is entirely in view, but its front lies beyond the
+    # old wall-derived analysis polygon. Compare with the rendered pixels,
+    # rather than reproducing that polygon in the expected result.
+    changed = np.max(cv.absdiff(cv.imread(str(empty)), cv.imread(str(box))), axis=2) > 60
+    rows, columns = np.nonzero(changed)
+    contour = np.asarray(result["box_contour_pixels"])
+    np.testing.assert_allclose(contour.min(axis=0), [columns.min(), rows.min()], atol=3)
+    np.testing.assert_allclose(contour.max(axis=0), [columns.max(), rows.max()], atol=3)
+    assert np.count_nonzero(changed & (mask > 0)) / np.count_nonzero(changed) > 0.99
+    for name, mm in zip(("length", "width", "height"), physical, strict=True):
+        assert result["dimensions_inches"][name] * 25.4 == pytest.approx(mm, abs=8)
+
+
+@pytest.mark.parametrize("scale", [1, 2.4])
+def test_front_outside_image_still_measures_with_open_outline(tmp_path, scale):
+    empty, box = render_station(tmp_path, (450, 360, 65))
+    baseline, _, _ = measure_pair(empty, box)
+    for path in (empty, box):
+        cropped = cv.imread(str(path))[:900]
+        if scale != 1:
+            cropped = cv.resize(cropped, (round(1920 * scale), round(900 * scale)))
+        cv.imwrite(str(path), cropped)
+    result = save_measurement(empty, box, tmp_path / "review")
+    assert result["box_outline_complete"] is False
+    assert result["outline_warnings"]
+    for key, value in baseline["dimensions_inches"].items():
+        assert result["dimensions_inches"][key] == pytest.approx(value, abs=0.05)
+    for segment in result["box_contour_segments_pixels"]:
+        points = np.asarray(segment)
+        assert points[:, 1].max() < 895 * scale
+    saved = json.loads((tmp_path / "review/result.json").read_text())
+    assert saved["box_outline_complete"] is False
+
+
+@pytest.mark.parametrize("left,right", [(650, 1920), (0, 1200)])
+def test_cut_off_wall_contact_edge_cannot_shorten_measurement(tmp_path, left, right):
+    empty, box = render_station(tmp_path, (450, 360, 65))
+    for path in (empty, box):
+        cv.imwrite(str(path), cv.imread(str(path))[:, left:right])
+    with pytest.raises(MeasurementError, match="required top edge"):
+        measure_pair(empty, box)
+
+
+def test_multiple_frame_gaps_produce_separate_visible_paths():
+    from parcel_dimensioner.measurement import _visible_outline
+
+    contour = np.int32(
+        [
+            [[0, 200]],
+            [[100, 100]],
+            [[500, 100]],
+            [[599, 200]],
+            [[599, 300]],
+            [[500, 350]],
+            [[100, 350]],
+            [[0, 300]],
+        ]
+    )
+    _, _, segments, complete = _visible_outline(contour, (400, 600), cv, np)
+    assert not complete
+    assert segments == [[[100, 100], [500, 100]], [[500, 350], [100, 350]]]
+
+
 def test_full_resolution_measurement_preserves_native_barcode_coordinates(tmp_path):
     empty, box = render_station(tmp_path)
     baseline, _, _ = measure_pair(empty, box)
@@ -127,6 +194,10 @@ def test_full_resolution_measurement_preserves_native_barcode_coordinates(tmp_pa
         result["points_pixels"]["floor"], np.array(baseline["points_pixels"]["floor"]) * 2.4, atol=3
     )
     assert max(p[0] for p in result["box_contour_pixels"]) > 1920
+    assert result["box_outline_complete"] is True
+    np.testing.assert_allclose(
+        result["box_contour_segments_pixels"][0], result["box_contour_pixels"]
+    )
     for edge in result["box_edges_pixels"]:
         assert len(edge["start"]) == len(edge["end"]) == 2
 

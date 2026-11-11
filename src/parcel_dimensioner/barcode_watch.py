@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 from parcel_dimensioner.barcodes import _inside, barcode_result, decode_frame, unavailable
 
-GUIDE = (0.12, 0.18, 0.88, 0.82)
+GUIDE = (0.24, 0.22, 0.76, 0.78)
 
 
 @dataclass
@@ -50,7 +50,7 @@ def eligible(barcode, source_size, *, scale=(1, 1)):
 
 
 def read_presented_label(frame, decoder=decode_frame):
-    small = decoder(frame.preview, outline=guide_polygon(frame.preview.size))
+    small = decoder(frame.preview, outline=guide_polygon(frame.preview.size), quick=True)
     full_size = frame.image.size
     result = eligible(
         small,
@@ -61,7 +61,9 @@ def read_presented_label(frame, decoder=decode_frame):
         return result
     # The decoder may recover detail absent from the small stream. Both images
     # and their metadata were copied from one completed camera request.
-    return eligible(decoder(frame.image, outline=guide_polygon(full_size), enhance=True), full_size)
+    return eligible(
+        decoder(frame.image, outline=guide_polygon(full_size), enhance=True, quick=True), full_size
+    )
 
 
 class BarcodeWatch(threading.Thread):

@@ -2,7 +2,24 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
+
+
+def box_detail(image, result):
+    """Display-only crop around the detected box, with nearby wall context."""
+    points = result.get("box_contour_pixels", [])
+    points = [p for p in points if len(p) == 2 and all(math.isfinite(v) for v in p)]
+    if len(points) < 3:
+        return image.copy()
+    xs, ys = zip(*points, strict=True)
+    width, height = image.size
+    # Limit magnification on tiny packages; preserve some wall and floor context.
+    span_x = min(width, max(width * 0.3, (max(xs) - min(xs)) * 1.3 + 80))
+    span_y = min(height, max(height * 0.3, (max(ys) - min(ys)) * 1.3 + 80))
+    left = max(0, min(width - span_x, (min(xs) + max(xs) - span_x) / 2))
+    top = max(0, min(height - span_y, (min(ys) + max(ys) - span_y) / 2))
+    return image.crop((round(left), round(top), round(left + span_x), round(top + span_y)))
 
 
 def draw_box_review(image, result, cv, np):
@@ -15,10 +32,13 @@ def draw_box_review(image, result, cv, np):
         cv.line(marked, a, b, (12, 12, 12), thickness + 4, cv.LINE_AA)
         cv.line(marked, a, b, color, thickness, cv.LINE_AA)
 
-    outline = np.asarray(result.get("box_contour_pixels", []), np.int32).reshape(-1, 1, 2)
-    if len(outline) >= 3:
-        cv.polylines(marked, [outline], True, (12, 12, 12), width + 4, cv.LINE_AA)
-        cv.polylines(marked, [outline], True, (70, 230, 70), width, cv.LINE_AA)
+    segments = result.get("box_contour_segments_pixels", [result.get("box_contour_pixels", [])])
+    closed = result.get("box_outline_complete", True)
+    for segment in segments:
+        outline = np.asarray(segment, np.int32).reshape(-1, 1, 2)
+        if len(outline) >= 2:
+            cv.polylines(marked, [outline], closed, (12, 12, 12), width + 4, cv.LINE_AA)
+            cv.polylines(marked, [outline], closed, (70, 230, 70), width, cv.LINE_AA)
     for edge in result.get("box_edges_pixels", []):
         a, b = np.asarray(edge["start"], float), np.asarray(edge["end"], float)
         if edge["kind"] == "measured":
@@ -163,6 +183,8 @@ def save_scan_review(folder: Path, result: dict):
         ),
         (heading, heading_font, "white"),
     ]
+    for warning in result.get("outline_warnings", []):
+        lines.append((warning, body_font, "#ffcc71"))
     for index, candidate in enumerate(candidates[:4]):
         text = safe_text(candidate["value"])
         if len(text) > 80:

@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from parcel_dimensioner.barcode_watch import LabelFrame
+from parcel_dimensioner.barcode_watch import GUIDE, LabelFrame
 from parcel_dimensioner.barcodes import (
     PackageIdError,
     barcode_result,
@@ -109,11 +109,17 @@ class StationCamera:
         self._check_restored()
         controls = importlib.import_module("libcamera").controls
         x, y, w, h = self.camera.camera_properties["ScalerCropMaximum"]
+        left, top, right, bottom = GUIDE
         values = {
             "AfMode": controls.AfModeEnum.Continuous,
             "AfMetering": controls.AfMeteringEnum.Windows,
             "AfWindows": [
-                (round(x + w * 0.30), round(y + h * 0.25), round(w * 0.40), round(h * 0.50))
+                (
+                    round(x + w * left),
+                    round(y + h * top),
+                    round(w * (right - left)),
+                    round(h * (bottom - top)),
+                )
             ],
             "AeEnable": True,
         }
@@ -123,6 +129,8 @@ class StationCamera:
             values["ExposureValue"] = -0.5
         if "AfRange" in self.camera.camera_controls:
             values["AfRange"] = controls.AfRangeEnum.Full
+        if "AfSpeed" in self.camera.camera_controls:
+            values["AfSpeed"] = controls.AfSpeedEnum.Fast
         # Mark the mode before submitting controls so a partial failure also
         # requires station restoration before any subsequent capture.
         self.listening = True
@@ -139,6 +147,8 @@ class StationCamera:
             values["ExposureValue"] = 0.0
         if "AfRange" in self.camera.camera_controls:
             values["AfRange"] = controls.AfRangeEnum.Normal
+        if "AfSpeed" in self.camera.camera_controls:
+            values["AfSpeed"] = controls.AfSpeedEnum.Normal
         try:
             self.camera.set_controls(values)
             _set_manual_focus(self.camera, self.position)

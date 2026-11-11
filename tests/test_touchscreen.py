@@ -166,6 +166,7 @@ def test_automatic_label_measure_and_next_box_layout(tmp_path, monkeypatch, requ
         "scan_id": "scan-1",
         "dimensions_inches": {"length": 9, "width": 8, "height": 3},
         "weight": {"pounds": 5},
+        "outline_warnings": ["Partial outline; inspect marked result."],
     }
 
     def command(action):
@@ -203,13 +204,22 @@ def test_automatic_label_measure_and_next_box_layout(tmp_path, monkeypatch, requ
             app.shared.worker.events.put(("label", label_result()))
         elif stage == 2:
             assert "ID: PKG-42" in app.texts()
-            assert "Barcode read" in app.texts()
+            assert "2 · Place box in corner" in app.texts()
+            assert not any(
+                w.cget("bg") == "#007b49"
+                for w in app.descendants(app.root)
+                if isinstance(w, app.tk.Label)
+            )
+            assert app.button("Measure box").cget("state") == "normal"
+            assert app.button("Measure box").cget("bg") == "#009c57"
+            assert app.button("Measure box").cget("height") == 4
             assert app.sounds == [True]
             app.snapshot(f"barcode-read-{width}.png")
             app.button("Measure box").invoke()
         elif stage == 3:
             assert "5.00 lb" in app.texts() and any("9.00" in text for text in app.texts())
             assert "Measurement saved" in app.texts()
+            assert any("Partial outline" in text for text in app.texts())
             for widget in app.descendants(app.root):
                 if isinstance(widget, app.tk.Button) and widget.winfo_ismapped():
                     x, y = (
@@ -219,7 +229,9 @@ def test_automatic_label_measure_and_next_box_layout(tmp_path, monkeypatch, requ
                     assert x >= 0 and x + widget.winfo_width() <= width
                     assert y >= 0 and y + widget.winfo_height() <= height
             app.snapshot(f"result-{width}.png")
-            app.button("Marked result").invoke()
+            app.button("Full result").invoke()
+            app.button("Live view").invoke()
+            app.button("Box detail").invoke()
             app.button("Next box").invoke()
         else:
             assert not any("PKG-42" in text for text in app.texts())
@@ -228,6 +240,34 @@ def test_automatic_label_measure_and_next_box_layout(tmp_path, monkeypatch, requ
             assert app.commands == ["empty", "scan", "next"]
 
     app.run(check, 5)
+
+
+def test_decoded_label_shows_progress_before_measure_is_enabled(tmp_path, monkeypatch, request):
+    if isolated_ui_case(request):
+        return
+    app = ui(tmp_path, monkeypatch)
+
+    def command(action):
+        if action == "empty":
+            app.shared.worker.events.put(("empty", "Ready"))
+            app.shared.worker.events.put(("label_detected", None))
+
+    app.shared.on_command = command
+
+    def check(stage):
+        if stage == 0:
+            app.button("Capture empty station").invoke()
+        elif stage == 1:
+            assert "Barcode detected" in app.texts()
+            assert app.button("Getting ready…").cget("state") == "disabled"
+            assert not app.sounds
+            app.shared.worker.events.put(("label", label_result()))
+        else:
+            assert "2 · Place box in corner" in app.texts()
+            assert app.button("Measure box").cget("state") == "normal"
+            assert app.sounds == [True]
+
+    app.run(check, 3)
 
 
 def test_more_pauses_reader_and_manual_id_keyboard(tmp_path, monkeypatch, request):
@@ -326,7 +366,7 @@ def test_multiple_codes_require_choice_and_marked_id_refreshes(tmp_path, monkeyp
             assert "ID: B" in app.texts() and app.sounds == [True]
             app.button("Measure box").invoke()
         elif stage == 4:
-            app.button("Marked result").invoke()
+            app.button("Full result").invoke()
             app.button("Edit").invoke()
         elif stage == 5:
             app.button("Clear").invoke()

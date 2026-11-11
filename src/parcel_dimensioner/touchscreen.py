@@ -12,6 +12,7 @@ from parcel_dimensioner.camera.contracts import CameraError
 from parcel_dimensioner.feedback import barcode_chime
 from parcel_dimensioner.measurement import _vision
 from parcel_dimensioner.package_id_editor import display_text, open_package_id_editor
+from parcel_dimensioner.review import box_detail
 from parcel_dimensioner.settings import ScaleSettings
 from parcel_dimensioner.station_worker import StationWorker
 
@@ -48,7 +49,8 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
         pending=None,
         result=None,
         review=None,
-        show_review=False,
+        detail=None,
+        review_view="live",
         live=None,
         photo=None,
         display_key=None,
@@ -58,7 +60,7 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
         confirm_until=0,
     )
     portrait = root.winfo_screenheight() > root.winfo_screenwidth()
-    font = 16 if portrait else 14
+    font = 18 if portrait else 16
     preview_frame = tk.Frame(root, bg="#08131b", height=100)
     preview_frame.pack_propagate(False)
     preview_frame.pack(fill="both", expand=True, padx=8, pady=(8, 6))
@@ -168,18 +170,19 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
             title = "1 · Show barcode"
         elif state["phase"] == "choose":
             title = "Choose a barcode"
+        elif state["phase"] == "preparing":
+            title = "Barcode detected"
         elif state["phase"] == "result":
             title = "Measurement saved"
-        elif time.monotonic() < state["confirm_until"]:
-            title = "Barcode read"
+        elif state["busy"]:
+            title = "Measuring…"
         else:
             title = "2 · Place box in corner"
         if state["closing"]:
             title = "Closing…"
         headline.set(title)
-        headline_label.configure(
-            fg="#71dcc4" if title in ("Barcode read", "Measurement saved") else "white"
-        )
+        ready_to_measure = idle() and state["phase"] == "measure"
+        headline_label.configure(fg="#71dcc4" if state["phase"] == "result" else "white")
         action = (
             "Capture empty station"
             if not state["empty"]
@@ -189,21 +192,27 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
             if state["phase"] == "result"
             else "Choose ID"
             if state["phase"] == "choose"
+            else "Getting ready…"
+            if state["phase"] == "preparing"
             else "Measure box"
         )
         primary_button.configure(
-            text=action, state="normal" if idle() and state["phase"] != "label" else "disabled"
+            text=action,
+            state="normal" if idle() and state["phase"] != "label" else "disabled",
+            bg="#009c57" if ready_to_measure else "#007b70",
         )
         more_button.configure(state="normal" if idle() else "disabled")
         edit_button.configure(state="normal" if idle() and target else "disabled")
         review_button.configure(
             state="normal" if idle() else "disabled",
-            text="Live view" if state["show_review"] else "Marked result",
+            text={"detail": "Full result", "full": "Live view", "live": "Box detail"}[
+                state["review_view"]
+            ],
         )
         fallback_button.configure(state="normal" if idle() else "disabled")
 
     def clear_result():
-        state.update(result=None, review=None, show_review=False, display_key=None)
+        state.update(result=None, review=None, detail=None, review_view="live", display_key=None)
         for value in values.values():
             value.set("—")
 
@@ -351,7 +360,9 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
         dialog.protocol("WM_DELETE_WINDOW", close_menu)
 
     def toggle_review():
-        state["show_review"] = not state["show_review"]
+        state["review_view"] = {"detail": "full", "full": "live", "live": "detail"}[
+            state["review_view"]
+        ]
         refresh()
 
     def close():
@@ -367,7 +378,7 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
         identity,
         text="Edit",
         command=edit_package,
-        font=("Sans", 12, "bold"),
+        font=("Sans", 14, "bold"),
         bg="#345269",
         fg="white",
         height=2,
@@ -384,8 +395,8 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
         fg="white",
         disabledforeground="#a0acb4",
         relief="flat",
-        width=18,
-        height=3,
+        width=20,
+        height=4,
         wraplength=220,
         takefocus=False,
     )
@@ -398,8 +409,8 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
         bg="#345269",
         fg="white",
         relief="flat",
-        width=8,
-        height=3,
+        width=9,
+        height=4,
         takefocus=False,
     )
     more_button.grid(row=0, column=1, padx=5, sticky="nsew")
@@ -407,7 +418,7 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
         root,
         text="Marked result",
         command=toggle_review,
-        font=("Sans", 12, "bold"),
+        font=("Sans", 14, "bold"),
         bg="#345269",
         fg="white",
         height=2,
@@ -434,7 +445,7 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
         relief="flat",
         takefocus=False,
     )
-    exit_button.place(relx=1, x=-8, y=8, anchor="ne", width=56, height=56)
+    exit_button.place(relx=1, x=-8, y=8, anchor="ne", width=64, height=64)
     root.protocol("WM_DELETE_WINDOW", close)
     root.bind("<Escape>", lambda event: close())
 
@@ -454,6 +465,12 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
     def load_review(path):
         with Image.open(path) as image:
             state["review"] = image.copy()
+        station_image = Path(path).with_name("measurement.jpg")
+        if station_image.exists():
+            with Image.open(station_image) as image:
+                state["detail"] = box_detail(image, state["result"] or {})
+        else:
+            state["detail"] = box_detail(state["review"], state["result"] or {})
         state["display_key"] = None
 
     def poll():
@@ -482,6 +499,10 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
                         )
                 elif event == "listening":
                     state["listening"] = payload
+                elif event == "label_detected":
+                    if not state["closing"]:
+                        state.update(busy=True, phase="preparing", listening=False)
+                        status.set("Label found. Getting the station ready…")
                 elif event == "label":
                     if state["closing"]:
                         continue
@@ -493,14 +514,14 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
                     clear_result()
                     if payload.get("package_id"):
                         status.set(
-                            "Place this same box against both walls, hands off, "
-                            "then tap Measure box."
+                            "ID held. Place this box against both walls, remove your hands, "
+                            "then tap the green Measure box button."
                         )
                         if payload.get("package_id_source") != "manual" and state[
                             "beep_id"
                         ] != payload.get("scan_id"):
                             state["beep_id"] = payload.get("scan_id")
-                            state["confirm_until"] = time.monotonic() + 1.6
+                            state["confirm_until"] = time.monotonic() + 4
                             with suppress(tk.TclError):
                                 barcode_chime(root.bell)
                     else:
@@ -513,7 +534,13 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
                     status.set("Barcode skipped. Place the box in the corner and tap Measure box.")
                 elif event == "result":
                     result, path = payload
-                    state.update(busy=False, pending=None, result=result, phase="result")
+                    state.update(
+                        busy=False,
+                        pending=None,
+                        result=result,
+                        phase="result",
+                        review_view="detail",
+                    )
                     load_review(path)
                     for key in ("length", "width", "height"):
                         value = result["dimensions_inches"].get(key)
@@ -526,12 +553,16 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
                         else "Dimensions saved; weight unavailable."
                     )
                     movement = " ".join(result.get("station_movement_warnings", []))
+                    outline = " ".join(result.get("outline_warnings", []))
                     heights = result.get("height_by_wall_inches", {})
                     if abs(heights.get("long", 0) - heights.get("short", 0)) > 0.25:
                         note += " Wall heights disagree; inspect marked result."
                     status.set(
                         " ".join(
-                            filter(None, (note, movement, getattr(worker, "review_warning", "")))
+                            filter(
+                                None,
+                                (note, movement, outline, getattr(worker, "review_warning", "")),
+                            )
                         )
                     )
                 elif event == "package_id":
@@ -580,15 +611,20 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
             scale_label.configure(fg="#71dcc4" if reading["stable"] else "#ffca78")
         with suppress(queue.Empty):
             state["live"] = worker.frames.get_nowait()
-        image = state["review"] if state["show_review"] else state["live"]
+        view = state["review_view"]
+        image = (
+            state["detail"]
+            if view == "detail"
+            else state["review"]
+            if view == "full"
+            else state["live"]
+        )
         confirmed = state["phase"] == "measure" and time.monotonic() < state["confirm_until"]
-        if confirmed != (headline.get() == "Barcode read") and state["phase"] == "measure":
-            refresh()
         key = (
             id(image),
             preview_frame.winfo_width(),
             preview_frame.winfo_height(),
-            state["show_review"],
+            view,
             state["listening"],
             confirmed,
         )
@@ -597,7 +633,7 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
             image.thumbnail(
                 (max(10, preview_frame.winfo_width()), max(10, preview_frame.winfo_height()))
             )
-            if not state["show_review"] and (state["listening"] or confirmed):
+            if view == "live" and (state["listening"] or confirmed):
                 left, top, right, bottom = GUIDE
                 rectangle = (
                     left * image.width,

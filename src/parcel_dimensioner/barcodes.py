@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import math
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -67,7 +68,7 @@ def decode_image(path: Path, *, outline=None, enhance=False):
     return decode_frame(image, outline=outline, enhance=enhance)
 
 
-def decode_frame(image, *, outline=None, enhance=False):
+def decode_frame(image, *, outline=None, enhance=False, quick=False):
     """Decode an owned PIL frame without writing temporary images to disk."""
     try:
         import zxingcpp
@@ -79,14 +80,25 @@ def decode_frame(image, *, outline=None, enhance=False):
     try:
         width, height = image.size
         identity = ((1, 0, 0), (0, 1, 0), (0, 0, 1))
-        if enhance:
+        if quick:
+            from parcel_dimensioner.label_reader import live_views
+
+            views = live_views(image, outline, enhance=enhance)
+        elif enhance:
             from parcel_dimensioner.label_reader import label_views
 
             views = label_views(image, outline)
         else:
             gray = ImageOps.autocontrast(ImageOps.grayscale(image))
             views = ((current, identity) for current in (image, gray, ImageOps.invert(gray)))
-        candidates = _read_views(views, outline, zxingcpp, downscale=not enhance)
+        candidates = _read_views(
+            views,
+            outline,
+            zxingcpp,
+            downscale=not (enhance or quick),
+            stop_on_success=quick,
+            minimum_span=width * 0.10 if quick else 0,
+        )
     except Exception as exc:
         return unavailable(f"Barcode decoding failed: {exc}")
     return barcode_result(
@@ -98,7 +110,7 @@ def decode_frame(image, *, outline=None, enhance=False):
     )
 
 
-def _read_views(views, outline, decoder, *, downscale):
+def _read_views(views, outline, decoder, *, downscale, stop_on_success=False, minimum_span=0):
     candidates = {}
     for current, matrix in views:
         for code in decoder.read_barcodes(
@@ -119,6 +131,11 @@ def _read_views(views, outline, decoder, *, downscale):
             center = [sum(v[i] for v in points) / 4 for i in (0, 1)]
             if outline is not None and not _inside(center, outline):
                 continue
+            if (
+                max(math.dist(a, b) for a, b in zip(points, [*points[1:], points[0]], strict=True))
+                < minimum_span
+            ):
+                continue
             candidate = candidates.setdefault(
                 code.text,
                 {
@@ -137,6 +154,10 @@ def _read_views(views, outline, decoder, *, downscale):
             raw = base64.b64encode(code.bytes).decode("ascii")
             if raw not in candidate["raw_bytes_base64"]:
                 candidate["raw_bytes_base64"].append(raw)
+        # Keep every distinct code from this view; further passes are recovery
+        # work, not a reason to delay feedback after a valid presented label.
+        if stop_on_success and candidates:
+            break
     return list(candidates.values())
 
 

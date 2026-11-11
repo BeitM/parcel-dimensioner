@@ -45,6 +45,44 @@ def test_rotated_and_inverted_code(tmp_path):
     assert initial_identity(result)["package_id"] == "ROTATED-42"
 
 
+def test_live_pass_keeps_multiple_codes_and_stops_recovery_after_success(monkeypatch):
+    from parcel_dimensioner import label_reader
+    from parcel_dimensioner.barcodes import decode_frame
+
+    image = pytest.importorskip("PIL.Image")
+    canvas = image.new("RGB", (1600, 900), "white")
+    canvas.paste(label("LIVE-ONE"), (500, 250))
+    canvas.paste(label("LIVE-TWO"), (500, 550))
+
+    def views(*args, **kwargs):
+        yield canvas, ((1, 0, 0), (0, 1, 0), (0, 0, 1))
+        raise AssertionError("Should not process further views after finding these codes")
+
+    monkeypatch.setattr(label_reader, "live_views", views)
+    result = decode_frame(canvas, quick=True)
+    assert result["status"] == "multiple"
+    assert {c["value"] for c in result["candidates"]} == {"LIVE-ONE", "LIVE-TWO"}
+
+
+def test_tiny_background_code_does_not_stop_live_recovery(monkeypatch):
+    from parcel_dimensioner import label_reader
+    from parcel_dimensioner.barcodes import decode_frame
+
+    image = pytest.importorskip("PIL.Image")
+    small = image.new("RGB", (1600, 900), "white")
+    small.paste(label("SMALL", "QRCode"), (700, 300))
+    presented = image.new("RGB", (1600, 900), "white")
+    presented.paste(label("PRESENTED"), (500, 350))
+
+    def views(*args, **kwargs):
+        for current in (small, presented):
+            yield current, ((1, 0, 0), (0, 1, 0), (0, 0, 1))
+
+    monkeypatch.setattr(label_reader, "live_views", views)
+    result = decode_frame(small, quick=True)
+    assert [c["value"] for c in result["candidates"]] == ["PRESENTED"]
+
+
 def test_barcode_decoder_keeps_full_resolution_image_and_native_positions(tmp_path):
     image = pytest.importorskip("PIL.Image")
     canvas = image.new("RGB", (4608, 2592), "white")
