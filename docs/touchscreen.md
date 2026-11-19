@@ -150,10 +150,17 @@ The scan's **top-level `result.json`** contains dimensions AND weight (or the
 explicit missing-weight reason); the review JSON is the vision-only report.
 The top-level file also contains the barcode candidates, selected/manual package
 ID, and timestamped ID-edit history. A new scan clears the previous package ID.
-Failed attempts retain an `error.txt` and `attempt.json`, plus any images already
-captured. A failure before capture has no box image. Original capture images are
-not overwritten. The derived `review/scan.jpg` is regenerated after ID edits.
-These runtime files are ignored by Git.
+Failed attempts save an `error.txt` and `attempt.json`, plus any images already
+captured. A failure before capture has no box image. Editing an ID regenerates
+`review/scan.jpg`. These runtime files are ignored by Git.
+
+Box Scanner removes station photos, marked images, and change masks 48 hours
+after capture, including images from previous station sessions. It checks when
+the app starts and every 10 minutes while it is running. The active empty
+reference, pending label, and current result stay available while in use.
+Measurement JSON, capture metadata, error logs, and
+separate calibration sessions are kept. Export any session you want to review
+with its photos beyond the retention window.
 
 The application owns one camera for preview and all captures. Continuous
 autofocus is used during label listening; the original locked station focus is

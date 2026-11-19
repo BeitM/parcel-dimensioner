@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -58,6 +59,42 @@ def test_reference_reused_and_scans_saved_separately(tmp_path):
     metadata = json.loads((s.directory / "scan-0002/box.json").read_text())
     assert metadata["metadata"]["LensPosition"] == 1.0
     assert session(tmp_path).reference is None
+
+
+def test_photo_cleanup_protects_work_in_progress_until_released(tmp_path):
+    s = session(tmp_path)
+    empty = s.capture_empty()
+    s.manual_label("PACKAGE-42")
+    pending_dir, _ = s.pending_label
+    pending = pending_dir / "label.jpg"
+    old_capture = (datetime.now(UTC) - timedelta(hours=49)).isoformat()
+
+    def backdate(photo):
+        sidecar = photo.with_suffix(".json")
+        record = json.loads(sidecar.read_text(encoding="utf-8"))
+        sidecar.write_text(json.dumps({**record, "captured_at": old_capture}), encoding="utf-8")
+
+    backdate(empty)
+    backdate(pending)
+    s.prune_photos()
+    assert empty.is_file() and pending.is_file()
+
+    s.scan()
+    scan, _ = s.last_scan
+    shot = scan / "box.jpg"
+    review = scan / "review" / "measurement.jpg"
+    review.write_bytes(b"review")
+    backdate(shot)
+    s.prune_photos()
+    assert empty.is_file() and shot.is_file() and review.is_file()
+    assert not pending.exists()
+    assert (scan / "label.jpg").is_file()
+
+    s.capture_empty()
+    s.prune_photos()
+    for photo in (empty, shot, review, scan / "label.jpg"):
+        assert not photo.exists()
+    assert (scan / "result.json").is_file()
 
 
 def test_live_label_latches_source_frame_and_is_consumed_once(tmp_path):

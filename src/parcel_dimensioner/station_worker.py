@@ -9,6 +9,7 @@ import traceback
 from contextlib import suppress
 
 from parcel_dimensioner.barcode_watch import BarcodeWatch
+from parcel_dimensioner.photo_retention import PHOTO_CLEANUP_INTERVAL_SECONDS
 from parcel_dimensioner.scale import ScaleError, SerialScale
 from parcel_dimensioner.station import ScanSession, StationCamera
 
@@ -48,8 +49,13 @@ class StationWorker(threading.Thread):
             session = ScanSession(
                 self.captures_dir, camera, self.settings, scale=self.scale, cancel=self.stopping
             )
+            session.prune_photos()
+            next_cleanup = time.monotonic() + PHOTO_CLEANUP_INTERVAL_SECONDS
             self.events.put(("ready", str(session.directory)))
             while not self.stopping.is_set():
+                if time.monotonic() >= next_cleanup:
+                    session.prune_photos()
+                    next_cleanup = time.monotonic() + PHOTO_CLEANUP_INTERVAL_SECONDS
                 try:
                     action = self.commands.get_nowait()
                 except queue.Empty:
@@ -84,6 +90,7 @@ class StationWorker(threading.Thread):
                             self.events.put(("next", None))
                         elif command == "skip":
                             skip_barcode = True
+                            session.last_scan = None
                             session.clear_label()
                             wanted = False
                             self.events.put(("skip", None))

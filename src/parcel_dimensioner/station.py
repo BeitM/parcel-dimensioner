@@ -38,6 +38,7 @@ from parcel_dimensioner.measurement import (
     _measurement_image,
     _vision,
 )
+from parcel_dimensioner.photo_retention import prune_station_photos
 from parcel_dimensioner.review import save_scan_review
 from parcel_dimensioner.settings import CameraSettings
 
@@ -274,6 +275,12 @@ class ScanSession:
 
     def clear_label(self):
         self.pending_label = None
+
+    def prune_photos(self):
+        protected = tuple(record[0] for record in (self.pending_label, self.last_scan) if record)
+        if self.reference is not None:
+            protected += (self.reference,)
+        prune_station_photos(self.directory.parent, protected=protected)
 
     def accept_live_label(self, frame, barcode):
         """Latch one decoded source exposure. Never overwrite an already held ID."""

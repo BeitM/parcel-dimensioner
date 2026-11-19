@@ -17,7 +17,8 @@ def test_live_id_is_held_focus_restored_and_next_box_is_deliberate(
 
     from parcel_dimensioner import station_worker
 
-    state = SimpleNamespace(focus=False, starts=0, measured=[])
+    state = SimpleNamespace(focus=False, starts=0, measured=[], cleanup_runs=0)
+    periodic_cleanup = threading.Event()
     code = {
         "status": "found",
         "selected_index": 0,
@@ -74,6 +75,11 @@ def test_live_id_is_held_focus_restored_and_next_box_is_deliberate(
             assert not state.focus
             self.reference = True
 
+        def prune_photos(self):
+            state.cleanup_runs += 1
+            if state.cleanup_runs == 2:
+                periodic_cleanup.set()
+
         def clear_label(self):
             self.pending_label = None
 
@@ -92,6 +98,7 @@ def test_live_id_is_held_focus_restored_and_next_box_is_deliberate(
     monkeypatch.setattr(station_worker, "StationCamera", Camera)
     monkeypatch.setattr(station_worker, "ScanSession", Session)
     monkeypatch.setattr(station_worker, "SerialScale", Scale)
+    monkeypatch.setattr(station_worker, "PHOTO_CLEANUP_INTERVAL_SECONDS", 0.05)
     entered, release = threading.Event(), threading.Event()
     if not pause_during_decode:
         release.set()
@@ -116,6 +123,8 @@ def test_live_id_is_held_focus_restored_and_next_box_is_deliberate(
     worker.start()
     try:
         event("ready")
+        assert state.cleanup_runs >= 1
+        assert periodic_cleanup.wait(2)
         worker.commands.put("empty")
         if pause_during_decode:
             assert entered.wait(2)
