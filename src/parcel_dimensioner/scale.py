@@ -123,6 +123,16 @@ class SerialScale(threading.Thread):
             raise ScaleError("Weight is moving — keep hands off the platform.")
         return window, spread
 
+    def ready_for_capture(self):
+        """A fresh, zeroed scale can accept a request even while weight is settling."""
+        with self.condition:
+            return bool(
+                self.connected
+                and self.zero_raw is not None
+                and self.samples
+                and time.monotonic() - self.samples[-1][0] <= self.settings.freshness_seconds
+            )
+
     def snapshot(self):
         with self.condition:
             now = time.monotonic()

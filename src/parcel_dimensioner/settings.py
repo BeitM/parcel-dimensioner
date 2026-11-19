@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -82,10 +83,45 @@ class ScaleSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class ApiSettings:
+    enabled: bool = False
+    device_id: str = "box-scanner"
+    host: str = "127.0.0.1"
+    port: int = 8765
+    token_file: str = ""
+    tls_cert_file: str = ""
+    tls_key_file: str = ""
+
+    def __post_init__(self) -> None:
+        if type(self.enabled) is not bool:
+            raise SettingsError("api.enabled must be true or false")
+        if not isinstance(self.device_id, str) or not re.fullmatch(
+            r"[A-Za-z0-9_-]{1,128}", self.device_id
+        ):
+            raise SettingsError(
+                "api.device_id must use 1 to 128 letters, numbers, hyphens or underscores"
+            )
+        if type(self.port) is not int or not 1 <= self.port <= 65535:
+            raise SettingsError("api.port must be between 1 and 65535")
+        for name in ("host", "token_file", "tls_cert_file", "tls_key_file"):
+            if not isinstance(getattr(self, name), str):
+                raise SettingsError(f"api.{name} must be a string")
+        if not self.host.strip():
+            raise SettingsError("api.host must be a listening address")
+        if self.enabled and not self.token_file:
+            raise SettingsError("Set api.token_file to enable the scanner API")
+        if bool(self.tls_cert_file) != bool(self.tls_key_file):
+            raise SettingsError("Configure both API TLS certificate and key files")
+        if self.enabled and self.host != "127.0.0.1" and not self.tls_cert_file:
+            raise SettingsError("API connections outside 127.0.0.1 require HTTPS")
+
+
+@dataclass(frozen=True, slots=True)
 class AppSettings:
     captures_dir: Path = Path("data/captures")
     camera: CameraSettings = CameraSettings()
     scale: ScaleSettings = ScaleSettings()
+    api: ApiSettings = ApiSettings()
 
 
 def resolve_config_path(path: Path | None = None) -> Path:
@@ -111,7 +147,7 @@ def load_settings(path: Path | None = None) -> AppSettings:
     except tomllib.TOMLDecodeError as exc:
         raise SettingsError(f"invalid TOML in {config_path}: {exc}") from exc
 
-    _reject_unknown(raw, {"captures_dir", "camera", "scale"}, "root")
+    _reject_unknown(raw, {"captures_dir", "camera", "scale", "api"}, "root")
     camera_raw = raw.get("camera", {})
     if not isinstance(camera_raw, dict):
         raise SettingsError("camera must be a TOML table")
@@ -124,12 +160,19 @@ def load_settings(path: Path | None = None) -> AppSettings:
     if not isinstance(scale_raw, dict):
         raise SettingsError("scale must be a TOML table")
     _reject_unknown(scale_raw, set(ScaleSettings.__dataclass_fields__), "scale")
+    api_raw = raw.get("api", {})
+    if not isinstance(api_raw, dict):
+        raise SettingsError("api must be a TOML table")
+    _reject_unknown(api_raw, set(ApiSettings.__dataclass_fields__), "api")
 
     try:
         camera = CameraSettings(**camera_raw)
         captures_dir = Path(raw.get("captures_dir", "data/captures"))
         return AppSettings(
-            captures_dir=captures_dir, camera=camera, scale=ScaleSettings(**scale_raw)
+            captures_dir=captures_dir,
+            camera=camera,
+            scale=ScaleSettings(**scale_raw),
+            api=ApiSettings(**api_raw),
         )
     except (TypeError, ValueError) as exc:
         if isinstance(exc, SettingsError):

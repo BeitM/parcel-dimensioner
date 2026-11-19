@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import queue
+import sqlite3
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -11,13 +12,16 @@ from parcel_dimensioner.barcode_watch import GUIDE
 from parcel_dimensioner.camera.contracts import CameraError
 from parcel_dimensioner.feedback import barcode_chime
 from parcel_dimensioner.measurement import _vision
+from parcel_dimensioner.measurement_store import ApiError
 from parcel_dimensioner.package_id_editor import display_text, open_package_id_editor
 from parcel_dimensioner.review import box_detail
 from parcel_dimensioner.settings import ScaleSettings
 from parcel_dimensioner.station_worker import StationWorker
 
 
-def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, windowed=False):
+def launch_touchscreen(
+    settings, captures_dir: Path, *, scale_settings=None, api_settings=None, windowed=False
+):
     try:
         import tkinter as tk
 
@@ -37,7 +41,9 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
     root.geometry("1000x680")
     root.attributes("-fullscreen", not windowed)
     root.configure(bg="#10202c")
-    worker = StationWorker(settings, captures_dir, scale_settings or ScaleSettings())
+    api_enabled = bool(api_settings and api_settings.enabled)
+    options = {"api_settings": api_settings} if api_enabled else {}
+    worker = StationWorker(settings, captures_dir, scale_settings or ScaleSettings(), **options)
     state = dict(
         ready=False,
         empty=False,
@@ -58,6 +64,7 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
         fallback=None,
         beep_id=None,
         confirm_until=0,
+        request_id=None,
     )
     portrait = root.winfo_screenheight() > root.winfo_screenwidth()
     font = 18 if portrait else 16
@@ -88,6 +95,7 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
         justify="center",
     )
     status_label.pack(fill="x", padx=14, pady=(0, 6))
+    request_notice = tk.Label(root, bg="#10202c", fg="#ffca78", font=("Sans", 13, "bold"))
     identity = tk.Frame(root, bg="#193442")
     package_value = tk.StringVar(value="")
     package_label = tk.Label(
@@ -143,6 +151,18 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
         review_button.pack_forget()
         scale_label.pack_forget()
         fallback_button.pack_forget()
+        request_notice.pack_forget()
+        continue_button.pack_forget()
+        if state["request_id"] is not None and state["ready"]:
+            request_notice.configure(
+                text={
+                    "result": "Capture requested · Tap Next box to continue",
+                    "measure": "Capture requested · Place box and tap Measure",
+                }.get(state["phase"], "Capture requested")
+            )
+            request_notice.pack(fill="x", padx=12, before=status_label)
+        if api_enabled and state["phase"] == "label" and idle():
+            continue_button.pack(pady=(2, 0), before=footer)
         if target:
             package_value.set(
                 "ID: " + (display_text(value, 44) if value else "Choose the correct barcode")
@@ -222,6 +242,16 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
         reason = state["fallback"] if action == "dimensions_only" else None
         if action == "dimensions_only" and reason is None:
             return
+        command = ("scan", reason) if action == "dimensions_only" else action
+        if api_enabled and action in ("scan", "dimensions_only"):
+            try:
+                command = worker.begin_measurement(state["request_id"], reason)
+            except ApiError as exc:
+                status.set(str(exc))
+                return
+            except (sqlite3.Error, OSError):
+                status.set("Could not access measurement storage. Check the Pi and retry.")
+                return
         state.update(busy=True, fallback=None)
         if action in ("empty", "zero", "next", "clear_label", "skip"):
             state["pending"] = None
@@ -240,7 +270,7 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
             }[action]
         )
         refresh()
-        worker.commands.put_nowait(("scan", reason) if action == "dimensions_only" else action)
+        worker.commands.put_nowait(command)
 
     def primary():
         if not state["empty"]:
@@ -435,6 +465,16 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
         height=2,
         takefocus=False,
     )
+    continue_button = tk.Button(
+        root,
+        text="Continue without barcode",
+        command=lambda: submit("skip"),
+        font=("Sans", 13, "bold"),
+        bg="#345269",
+        fg="white",
+        height=2,
+        takefocus=False,
+    )
     exit_button = tk.Button(
         preview_frame,
         text="Exit",
@@ -453,7 +493,7 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
         if event.widget is not root:
             return
         width = max(180, event.width - 30)
-        for label in (headline_label, status_label, scale_label):
+        for label in (headline_label, status_label, scale_label, request_notice):
             label.configure(wraplength=width)
         package_label.configure(wraplength=max(140, width - 115))
         primary_button.configure(wraplength=max(140, min(220, width - 160)))
@@ -480,6 +520,8 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
                 if event == "ready":
                     state.update(ready=True, busy=False, phase="setup")
                     status.set("Remove all boxes, then capture the empty station.")
+                elif event == "capture_request":
+                    state["request_id"] = payload
                 elif event in ("empty", "zero", "next"):
                     state.update(busy=False, pending=None, fallback=None, phase="label")
                     if event == "empty":
@@ -552,6 +594,8 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
                         if weight is not None
                         else "Dimensions saved; weight unavailable."
                     )
+                    if api_enabled and weight is None:
+                        note = "Dimensions saved locally. Sharing requires a measured weight."
                     movement = " ".join(result.get("station_movement_warnings", []))
                     outline = " ".join(result.get("outline_warnings", []))
                     status.set(
@@ -566,12 +610,19 @@ def launch_touchscreen(settings, captures_dir: Path, *, scale_settings=None, win
                     result, path = payload
                     state.update(busy=False, result=result)
                     load_review(path)
-                    status.set("Package ID saved. " + getattr(worker, "review_warning", ""))
+                    note = (
+                        "Local ID saved. The shared barcode is fixed at capture."
+                        if api_enabled and result.get("weight", {}).get("pounds") is not None
+                        else "Package ID saved."
+                    )
+                    status.set(note + " " + getattr(worker, "review_warning", ""))
                 elif event == "package_id_error":
                     state["busy"] = False
                     status.set("Could not save ID: " + payload[0])
                 elif event == "watch_error":
-                    state.update(busy=False, listening=False, phase="measure")
+                    state.update(
+                        busy=False, listening=False, phase="label" if api_enabled else "measure"
+                    )
                     status.set(payload + " Use More to enter an ID or retry.")
                 elif event in ("error", "weight_error", "zero_error"):
                     message, has_reference = payload

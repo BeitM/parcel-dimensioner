@@ -17,12 +17,15 @@ class LabelRestoreError(CameraError):
     pass
 
 
-def _wait(camera, job, cancel=None, timeout=8):
+def _wait(camera, job, cancel=None, timeout=8, *, timeout_message=None):
     deadline = time.monotonic() + timeout
     while True:
         if (cancel is not None and cancel.is_set()) or time.monotonic() >= deadline:
             camera.cancel_all_and_flush()
-            raise CameraError("Label capture cancelled or timed out. Try again with the box still.")
+            raise CameraError(
+                timeout_message
+                or "Label capture cancelled or timed out. Try again with the box still."
+            )
         try:
             return camera.wait(job, timeout=0.1)
         except TimeoutError:

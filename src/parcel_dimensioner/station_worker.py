@@ -3,19 +3,23 @@
 from __future__ import annotations
 
 import queue
+import sqlite3
 import threading
 import time
 import traceback
 from contextlib import suppress
+from functools import partial
 
 from parcel_dimensioner.barcode_watch import BarcodeWatch
+from parcel_dimensioner.measurement_store import MeasurementStore
 from parcel_dimensioner.photo_retention import PHOTO_CLEANUP_INTERVAL_SECONDS
 from parcel_dimensioner.scale import ScaleError, SerialScale
 from parcel_dimensioner.station import ScanSession, StationCamera
+from parcel_dimensioner.station_api import StationApiServer
 
 
 class StationWorker(threading.Thread):
-    def __init__(self, settings, captures_dir, scale_settings=None):
+    def __init__(self, settings, captures_dir, scale_settings=None, *, api_settings=None):
         super().__init__(daemon=True)
         self.settings, self.captures_dir = settings, captures_dir
         self.commands, self.events, self.frames = (
@@ -26,10 +30,32 @@ class StationWorker(threading.Thread):
         self.stopping, self.paused = threading.Event(), threading.Event()
         self.scale = SerialScale(scale_settings)
         self.review_warning = ""
+        self.api_settings = api_settings
+        self.measurements = None
+
+    def begin_measurement(self, displayed_request_id, dimensions_only_reason):
+        attempt = self.measurements.begin(displayed_request_id)
+        return "scan", (attempt, dimensions_only_reason)
+
+    def _scan(self, session, payload, skip_barcode):
+        if self.measurements is None:
+            return session.scan(dimensions_only_reason=payload, skip_barcode=skip_barcode)
+        attempt, reason = payload
+        try:
+            return session.scan(
+                dimensions_only_reason=reason,
+                skip_barcode=skip_barcode,
+                publish=partial(self.measurements.complete, attempt) if reason is None else None,
+            )
+        finally:
+            self.measurements.release(attempt)
 
     def run(self):
         camera, watch = StationCamera(self.settings), BarcodeWatch()
         session = None
+        api_server = None
+        next_request_check = 0.0
+        shown_request_id = None
         wanted, active = False, False
         skip_barcode = False
         next_frame = 0
@@ -51,6 +77,14 @@ class StationWorker(threading.Thread):
             )
             session.prune_photos()
             next_cleanup = time.monotonic() + PHOTO_CLEANUP_INTERVAL_SECONDS
+            if self.api_settings and self.api_settings.enabled:
+                self.measurements = MeasurementStore(
+                    self.captures_dir / "measurement-history.sqlite3",
+                    self.api_settings.device_id,
+                    hardware_ready=self.scale.ready_for_capture,
+                )
+                api_server = StationApiServer(self.api_settings, self.measurements)
+                api_server.start()
             self.events.put(("ready", str(session.directory)))
             while not self.stopping.is_set():
                 if time.monotonic() >= next_cleanup:
@@ -65,6 +99,8 @@ class StationWorker(threading.Thread):
                     suspend()
                     try:
                         if command == "empty":
+                            if self.measurements is not None:
+                                self.measurements.set_reference_ready(False)
                             skip_barcode = False
                             wanted = False
                             session.capture_empty()
@@ -105,9 +141,7 @@ class StationWorker(threading.Thread):
                             self.events.put(("package_id", (result, session.review_path)))
                         else:
                             wanted = False
-                            result = session.scan(
-                                dimensions_only_reason=payload, skip_barcode=skip_barcode
-                            )
+                            result = self._scan(session, payload, skip_barcode)
                             self.review_warning = session.review_warning
                             self.events.put(("result", result))
                     except ScaleError as exc:
@@ -120,6 +154,20 @@ class StationWorker(threading.Thread):
                             else "error"
                         )
                         self.events.put((event, (str(exc), session.reference is not None)))
+                    finally:
+                        if self.measurements is not None:
+                            self.measurements.set_reference_ready(session.reference is not None)
+                            next_request_check = 0.0
+                if self.measurements is not None and time.monotonic() >= next_request_check:
+                    next_request_check = time.monotonic() + 0.5
+                    try:
+                        request_id = self.measurements.active_request_id()
+                    except sqlite3.Error:
+                        pass  # The next measurement and HTTP queries surface storage errors.
+                    else:
+                        if request_id != shown_request_id:
+                            shown_request_id = request_id
+                            self.events.put(("capture_request", request_id))
                 desired = (
                     wanted
                     and session.reference is not None
@@ -185,6 +233,11 @@ class StationWorker(threading.Thread):
                     )
             self.events.put(("fatal", str(exc)))
         finally:
+            if api_server is not None:
+                api_server.close()
+            if self.measurements is not None:
+                with suppress(sqlite3.Error):
+                    self.measurements.stop()
             watch.close()
             try:
                 camera.close()

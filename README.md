@@ -96,6 +96,8 @@ the optional OpenCV/NumPy dependencies are absent.
 For touch-button capture and on-screen dimensions, see the
 [touchscreen app setup and daily workflow](docs/touchscreen.md). The app can be
 launched from a Box Scanner shortcut on the Pi desktop.
+The optional [station API](docs/station-api.md) accepts capture requests and
+serves completed measurements to a receiving app on the network.
 
 Install the optional vision dependencies in the same environment as the application:
 

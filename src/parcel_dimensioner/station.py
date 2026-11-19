@@ -28,7 +28,7 @@ from parcel_dimensioner.camera.picamera2_backend import (
     _plain_metadata,
     _set_manual_focus,
 )
-from parcel_dimensioner.label_capture import LabelRestoreError, _metadata, capture_labels
+from parcel_dimensioner.label_capture import LabelRestoreError, _metadata, _wait, capture_labels
 from parcel_dimensioner.label_reader import target_bounds
 from parcel_dimensioner.measurement import (
     BOARDS,
@@ -174,7 +174,12 @@ class StationCamera:
     def capture(self, path):
         self.stop_label_focus()
         self._check_restored()
-        metadata = _plain_metadata(self.camera.capture_file(str(path)) or {})
+        captured = _wait(
+            self.camera,
+            self.camera.capture_file(str(path), wait=False),
+            timeout_message="Camera capture timed out. Keep the box still and retry.",
+        )
+        metadata = _plain_metadata(captured or {})
         reported = metadata.get("LensPosition")
         if not isinstance(reported, (int, float)) or not math.isclose(
             reported, self.position, abs_tol=0.05
@@ -431,7 +436,7 @@ class ScanSession:
         self.pending_label = folder, result
         return result
 
-    def scan(self, *, dimensions_only_reason=None, skip_barcode=False):
+    def scan(self, *, dimensions_only_reason=None, skip_barcode=False, publish=None):
         self.last_scan = None
         if self.reference is None:
             raise MeasurementError("Capture the empty station first.")
@@ -454,6 +459,7 @@ class ScanSession:
                 ticket = self.scale.wait_stable(self.cancel)
             path = folder / "box.jpg"
             metadata = self._capture(path)
+            captured_at = datetime.now(UTC)
             if ticket is not None:
                 weight = self.scale.verify_capture(ticket, self.cancel)
             if metadata.get("ScalerCrop") != self.reference_metadata.get("ScalerCrop"):
@@ -513,6 +519,14 @@ class ScanSession:
                 **identity,
             }
             self._save_result(folder, result)
+            if publish is not None:
+                try:
+                    publish(result, captured_at)
+                except Exception:
+                    # Without a committed API result this is a failed attempt.
+                    with suppress(OSError):
+                        (folder / "result.json").unlink(missing_ok=True)
+                    raise
             self.last_scan = folder, result
             self._update_review(folder, result)
             self.clear_label()

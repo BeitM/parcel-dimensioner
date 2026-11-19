@@ -5,7 +5,10 @@ from types import SimpleNamespace
 import pytest
 
 from parcel_dimensioner.barcode_watch import BarcodeWatch
+from parcel_dimensioner.measurement_store import ApiError
+from parcel_dimensioner.scale import ScaleError
 from parcel_dimensioner.settings import CameraSettings
+from parcel_dimensioner.station import ScanSession
 from parcel_dimensioner.station_worker import StationWorker
 
 
@@ -151,6 +154,147 @@ def test_live_id_is_held_focus_restored_and_next_box_is_deliberate(
         assert not state.focus
     finally:
         release.set()
+        worker.stopping.set()
+        worker.join(timeout=4)
+        assert not worker.is_alive()
+
+
+def test_requested_scan_uses_station_capture_and_requires_weight(tmp_path, monkeypatch):
+    from parcel_dimensioner import station_worker
+
+    image = pytest.importorskip("PIL.Image")
+    scale_available = False
+
+    class Camera:
+        def __init__(self, settings):
+            self.frame = image.new("RGB", (100, 60), "white")
+
+        def start(self):
+            pass
+
+        def close(self):
+            pass
+
+        def start_label_focus(self):
+            pass
+
+        def stop_label_focus(self):
+            pass
+
+        def preview(self):
+            return self.frame
+
+        def label_frame(self, **kwargs):
+            return SimpleNamespace(preview=self.frame)
+
+        def capture(self, path):
+            self.frame.save(path)
+            return {"ScalerCrop": [0, 0, 100, 60]}
+
+    class Scale:
+        def __init__(self, settings):
+            self.zeroed = False
+
+        def start(self):
+            pass
+
+        def close(self):
+            pass
+
+        def zero(self, cancel):
+            self.zeroed = True
+
+        def ready_for_capture(self):
+            return self.zeroed
+
+        def wait_stable(self, cancel):
+            if not scale_available:
+                raise ScaleError("Unstable weight.")
+            return object()
+
+        def verify_capture(self, ticket, cancel):
+            return {"pounds": 8.5, "stable": True}
+
+    def measure(empty, box, review):
+        assert empty.is_file() and box.is_file()
+        return {"dimensions_inches": {"length": 12.5, "width": 8, "height": 10}}
+
+    def session(*args, **kwargs):
+        return ScanSession(
+            *args,
+            **kwargs,
+            validator=lambda _: None,
+            measure=measure,
+            reviewer=lambda folder, _: folder / "box.jpg",
+        )
+
+    monkeypatch.setattr(station_worker, "StationCamera", Camera)
+    monkeypatch.setattr(station_worker, "ScanSession", session)
+    monkeypatch.setattr(station_worker, "SerialScale", Scale)
+    monkeypatch.setattr(
+        station_worker,
+        "BarcodeWatch",
+        lambda: BarcodeWatch(reader=lambda _: {"status": "not_found"}),
+    )
+    token_file = tmp_path / "token"
+    token_file.write_text("t" * 32, encoding="utf-8")
+    settings = SimpleNamespace(
+        enabled=True,
+        device_id="cart",
+        host="127.0.0.1",
+        port=0,
+        token_file=token_file,
+        tls_cert_file="",
+        tls_key_file="",
+    )
+    worker = StationWorker(CameraSettings(), tmp_path, api_settings=settings)
+
+    def event(name):
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            kind, payload = worker.events.get(timeout=1)
+            assert kind != "fatal", payload
+            if kind == name:
+                return payload
+        raise AssertionError(f"No {name} event")
+
+    worker.start()
+    try:
+        event("ready")
+        store = worker.measurements
+        with pytest.raises(ApiError) as err:
+            store.create_request("incoming", 120)
+        assert err.value.status == 503
+        worker.commands.put("empty")
+        event("empty")
+        event("listening")
+
+        store.create_request("incoming", 120)
+        assert event("capture_request") == "incoming"
+        worker.commands.put("skip")
+        event("skip")
+        worker.commands.put(worker.begin_measurement("incoming", None))
+        assert event("weight_error")[0] == "Unstable weight."
+        assert store.request("incoming")["state"] == "pending"
+
+        worker.commands.put(worker.begin_measurement("incoming", "Unstable weight."))
+        result, _ = event("result")
+        assert result["scan_mode"] == "dimensions_only"
+        assert store.history(None, 100)["items"] == []
+        assert store.request("incoming")["state"] == "pending"
+
+        scale_available = True
+        worker.commands.put(worker.begin_measurement("incoming", None))
+        result, _ = event("result")
+        completed = store.request("incoming")
+        assert completed["state"] == "completed"
+        assert completed["measurementId"] == result["scan_id"]
+        measurement = store.measurement(completed["measurementId"])
+        assert measurement["barcodeStatus"] == "skipped"
+        assert measurement["weight"]["value"] == 8.5
+        assert measurement["dimensions"]["height"] == 10
+        assert event("capture_request") is None
+    finally:
         worker.stopping.set()
         worker.join(timeout=4)
         assert not worker.is_alive()

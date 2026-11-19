@@ -41,7 +41,7 @@ def label_result(value="PKG-42", capture="label-1"):
     }
 
 
-def ui(tmp_path, monkeypatch, width=480, height=853):
+def ui(tmp_path, monkeypatch, width=480, height=853, *, api_settings=None):
     tk = pytest.importorskip("tkinter")
     image = pytest.importorskip("PIL.Image")
     from parcel_dimensioner import touchscreen
@@ -64,7 +64,7 @@ def ui(tmp_path, monkeypatch, width=480, height=853):
     shared = SimpleNamespace(on_command=lambda action: None, review=review)
 
     class Worker:
-        def __init__(self, *args):
+        def __init__(self, *args, **kwargs):
             self.events, self.frames = queue.Queue(), queue.Queue()
             self.stopping, self.paused = threading.Event(), threading.Event()
             self.commands = self
@@ -80,6 +80,9 @@ def ui(tmp_path, monkeypatch, width=480, height=853):
         def put_nowait(self, action):
             commands.append(action)
             shared.on_command(action)
+
+        def begin_measurement(self, request_id, reason):
+            return "scan", (request_id, reason)
 
         def is_alive(self):
             return not self.stopping.is_set()
@@ -138,7 +141,9 @@ def ui(tmp_path, monkeypatch, width=480, height=853):
         for stage in range(stages):
             root.after(350 + stage * 350, lambda s=stage: tick(s))
         root.after(stages * 350 + 2200, root.destroy)
-        touchscreen.launch_touchscreen(CameraSettings(), tmp_path, windowed=True)
+        touchscreen.launch_touchscreen(
+            CameraSettings(), tmp_path, windowed=True, api_settings=api_settings
+        )
         assert not errors, errors
 
     return SimpleNamespace(
@@ -154,6 +159,38 @@ def ui(tmp_path, monkeypatch, width=480, height=853):
         snapshot=snapshot,
         run=run,
     )
+
+
+def test_capture_request_is_visible_and_binds_measure_tap(tmp_path, monkeypatch, request):
+    if isolated_ui_case(request):
+        return
+    app = ui(tmp_path, monkeypatch, api_settings=SimpleNamespace(enabled=True))
+
+    def command(action):
+        events = app.shared.worker.events
+        if action == "empty":
+            events.put(("empty", "Ready"))
+            events.put(("capture_request", "requested-box"))
+        elif action == "skip":
+            events.put(("skip", None))
+
+    def check(stage):
+        if stage == 0:
+            app.button("Capture empty station").invoke()
+        elif stage == 1:
+            assert any(
+                isinstance(widget, app.tk.Label)
+                and widget.cget("text") == "Capture requested"
+                and widget.winfo_ismapped()
+                for widget in app.descendants(app.root)
+            )
+            app.button("Continue without barcode").invoke()
+        elif stage == 2:
+            app.button("Measure box").invoke()
+            assert app.commands == ["empty", "skip", ("scan", ("requested-box", None))]
+
+    app.shared.on_command = command
+    app.run(check, stages=3)
 
 
 @pytest.mark.parametrize("width,height", [(480, 853), (720, 1280), (1000, 680)])

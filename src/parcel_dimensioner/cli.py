@@ -122,6 +122,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 camera_settings,
                 settings.captures_dir,
                 scale_settings=settings.scale,
+                api_settings=settings.api,
                 windowed=args.windowed,
             )
             return 0

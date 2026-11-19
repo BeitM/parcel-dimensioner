@@ -2,8 +2,9 @@
 
 The Pi can run a local fullscreen app with a live camera view, large touch
 buttons, dimensions in inches, weight in pounds, and automatic barcode/package
-ID reading. No browser, network server, or company
-API is needed. The desktop launcher opens this app; it does not start on boot.
+ID reading. The app works locally and can also serve an optional
+[station API](station-api.md) for capture requests and measurement history.
+The desktop launcher opens this app. Boot startup uses a separate autostart entry.
 
 The current camera defaults are 4608 x 2592 for the Camera Module 3 Wide. Barcode
 decoding reads the full saved photo; dimensions use a smaller working copy of

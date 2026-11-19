@@ -438,8 +438,12 @@ def test_camera_focus_mismatch_rejected_and_close_releases_owner(tmp_path):
     class Device:
         closed = False
 
-        def capture_file(self, _):
+        def capture_file(self, _, *, wait):
+            assert wait is False
             return {"LensPosition": 2.0}
+
+        def wait(self, job, *, timeout):
+            return job
 
         def close(self):
             self.closed = True
