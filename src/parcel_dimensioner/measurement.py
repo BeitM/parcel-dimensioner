@@ -391,7 +391,12 @@ def _wall_edges(image, walls, floor_lines, floor, visible, clipped, contour, squ
 
 
 def measure_pair(
-    empty_path: Path, box_path: Path, *, square_mm: float = 38.1, marker_mm: float = 28.0
+    empty_path: Path,
+    box_path: Path,
+    *,
+    square_mm: float = 38.1,
+    marker_mm: float = 28.0,
+    show_contour: bool = True,
 ) -> tuple[dict, object, object]:
     """Return an experimental result, annotated image, and diagnostic change mask."""
     if (
@@ -586,17 +591,25 @@ def measure_pair(
     for edge in result["box_edges_pixels"]:
         for key in ("start", "end"):
             edge[key] = (np.asarray(edge[key]) * factors).tolist()
-    annotated = draw_box_review(source_box, result, cv, np)
+    annotated = draw_box_review(source_box, result, cv, np, show_contour=show_contour)
     return result, annotated, mask
 
 
 def save_measurement(
-    empty: Path, box: Path, output_dir: Path, *, square_mm: float = 38.1, marker_mm: float = 28.0
+    empty: Path,
+    box: Path,
+    output_dir: Path,
+    *,
+    square_mm: float = 38.1,
+    marker_mm: float = 28.0,
+    show_contour: bool = True,
 ) -> dict:
     """Write a reviewable result to a new folder; never overwrite captures or prior results."""
     if output_dir.exists():
         raise MeasurementError(f"Output folder already exists: {output_dir}. Use a new name.")
-    result, annotated, mask = measure_pair(empty, box, square_mm=square_mm, marker_mm=marker_mm)
+    result, annotated, mask = measure_pair(
+        empty, box, square_mm=square_mm, marker_mm=marker_mm, show_contour=show_contour
+    )
     cv, _ = _vision()
     try:
         output_dir.mkdir(parents=True, exist_ok=False)

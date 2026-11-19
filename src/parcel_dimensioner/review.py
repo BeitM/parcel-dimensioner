@@ -22,7 +22,7 @@ def box_detail(image, result):
     return image.crop((round(left), round(top), round(left + span_x), round(top + span_y)))
 
 
-def draw_box_review(image, result, cv, np):
+def draw_box_review(image, result, cv, np, *, show_contour=True):
     marked = image.copy()
     scale = max(0.5, image.shape[1] / 1920)
     width = max(3, round(6 * scale))
@@ -32,13 +32,14 @@ def draw_box_review(image, result, cv, np):
         cv.line(marked, a, b, (12, 12, 12), thickness + 4, cv.LINE_AA)
         cv.line(marked, a, b, color, thickness, cv.LINE_AA)
 
-    segments = result.get("box_contour_segments_pixels", [result.get("box_contour_pixels", [])])
-    closed = result.get("box_outline_complete", True)
-    for segment in segments:
-        outline = np.asarray(segment, np.int32).reshape(-1, 1, 2)
-        if len(outline) >= 2:
-            cv.polylines(marked, [outline], closed, (12, 12, 12), width + 4, cv.LINE_AA)
-            cv.polylines(marked, [outline], closed, (70, 230, 70), width, cv.LINE_AA)
+    if show_contour:
+        segments = result.get("box_contour_segments_pixels", [result.get("box_contour_pixels", [])])
+        closed = result.get("box_outline_complete", True)
+        for segment in segments:
+            outline = np.asarray(segment, np.int32).reshape(-1, 1, 2)
+            if len(outline) >= 2:
+                cv.polylines(marked, [outline], closed, (12, 12, 12), width + 4, cv.LINE_AA)
+                cv.polylines(marked, [outline], closed, (70, 230, 70), width, cv.LINE_AA)
     for edge in result.get("box_edges_pixels", []):
         a, b = np.asarray(edge["start"], float), np.asarray(edge["end"], float)
         if edge["kind"] == "measured":
@@ -177,7 +178,7 @@ def save_scan_review(folder: Path, result: dict):
         heading = "Barcode unavailable - package ID not entered"
     lines = [
         (
-            "Green: detected outline | Yellow: measured top | Blue dashed: inferred edges",
+            "Yellow: measured top | Blue dashed: inferred edges",
             body_font,
             "#c3d6e2",
         ),

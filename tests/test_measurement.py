@@ -1,6 +1,7 @@
 """Image-level checks use rendered geometry, never manually chosen detection points."""
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -102,6 +103,41 @@ def test_rendered_box_automatic_measurement(tmp_path, physical):
     assert saved["method"] == "automatic-fixed-wall-silhouette"
     assert (output / "measurement.jpg").is_file()
     assert (output / "change-mask.png").is_file()
+
+
+def test_station_review_hides_green_outline_and_keeps_measurement_data(tmp_path):
+    pytest.importorskip("PIL.Image")
+    from parcel_dimensioner.settings import CameraSettings
+    from parcel_dimensioner.station import ScanSession
+
+    empty, box = render_station(tmp_path)
+    reference, diagnostic, mask = measure_pair(empty, box)
+
+    class Camera:
+        def capture(self, path):
+            shutil.copyfile(empty if path.name.startswith("empty-") else box, path)
+            return {}
+
+    session = ScanSession(tmp_path, Camera(), CameraSettings())
+    session.capture_empty()
+    result, full_result_path = session.scan(skip_barcode=True)
+    assert result["dimensions_inches"] == reference["dimensions_inches"]
+    assert result["box_contour_pixels"] == reference["box_contour_pixels"]
+    saved_mask = cv.imread(str(full_result_path.with_name("change-mask.png")), cv.IMREAD_GRAYSCALE)
+    assert np.array_equal(saved_mask, mask)
+
+    def green_outline(image):
+        blue, green, red = cv.split(image)
+        return (green > 180) & (blue < 110) & (red < 110)
+
+    assert green_outline(diagnostic).any()
+    for path in (full_result_path.with_name("measurement.jpg"), full_result_path):
+        image = cv.imread(str(path))
+        assert not green_outline(image).any()
+        blue, green, red = cv.split(image)
+        assert ((blue < 75) & (green > 220) & (red > 220)).any()
+        assert ((blue > 200) & (green > 170) & (red < 110)).any()
+        assert ((blue < 85) & (green < 85) & (red > 200)).any()
 
 
 def test_no_box_is_rejected(tmp_path):

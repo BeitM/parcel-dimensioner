@@ -134,14 +134,14 @@ Images and results stay on the Pi under
 `data/captures/station-<time>-<id>/`. Each empty capture has its own JPEG and JSON
 metadata. Each scan gets a numbered folder with `box.jpg`, capture metadata,
 `review/result.json`, `review/measurement.jpg`, and `review/change-mask.png`.
-**Full result** displays `review/scan.jpg`, which combines thicker box outlines,
-measurement guides, barcode highlights, and the selected/manual package ID.
-Green is the detected boundary, yellow is the measured top edges, and blue dashed
-lines are inferred cuboid edges. The green boundary is traced across the full
-camera image, including the platform in front of the walls. Front corners may
+**Full result** displays `review/scan.jpg`, which combines measurement guides,
+barcode highlights, and the selected/manual package ID. Yellow marks the measured
+top edges, dashed blue marks the inferred box edges, and red dots mark the
+measurement points. The detected outline is saved in the review JSON, and
+`review/change-mask.png` shows the pixels used to find it. Front corners may
 extend outside the image if both top edges against the walls and their end
 corners remain visible. The app then saves dimensions with a partial-outline
-notice, and the green paths stop at the frame instead of joining across the box.
+notice.
 A required wall-contact top edge cut off by the frame blocks measurement.
 If you reposition the camera, capture a new empty station afterward.
 Selected barcode regions are pink; other

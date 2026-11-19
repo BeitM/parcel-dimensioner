@@ -10,6 +10,7 @@ import time
 from contextlib import suppress
 from dataclasses import asdict
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from uuid import uuid4
 
@@ -242,7 +243,7 @@ class ScanSession:
         self.camera = camera
         self.settings = settings
         self.validator = validator
-        self.measure = measure or save_measurement
+        self.measure = measure or partial(save_measurement, show_contour=False)
         self.reference = None
         self.reference_metadata = None
         self.counter = 0
