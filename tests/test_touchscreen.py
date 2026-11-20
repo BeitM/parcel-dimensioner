@@ -61,7 +61,7 @@ def ui(tmp_path, monkeypatch, width=480, height=853, *, api_settings=None):
     monkeypatch.setattr(touchscreen, "barcode_chime", lambda bell: sounds.append(True))
     review = tmp_path / "marked.jpg"
     image.new("RGB", (800, 450), "#eeeeee").save(review)
-    shared = SimpleNamespace(on_command=lambda action: None, review=review)
+    shared = SimpleNamespace(on_command=lambda action: None, review=review, hold_worker_open=False)
 
     class Worker:
         def __init__(self, *args, **kwargs):
@@ -85,7 +85,7 @@ def ui(tmp_path, monkeypatch, width=480, height=853, *, api_settings=None):
             return "scan", (request_id, reason)
 
         def is_alive(self):
-            return not self.stopping.is_set()
+            return shared.hold_worker_open or not self.stopping.is_set()
 
         def join(self, **kwargs):
             pass
@@ -136,7 +136,7 @@ def ui(tmp_path, monkeypatch, width=480, height=853, *, api_settings=None):
                 for child in list(root.winfo_children()):
                     if isinstance(child, tk.Toplevel):
                         child.destroy()
-                button("Exit").invoke()
+                root.tk.call(root.protocol("WM_DELETE_WINDOW"))
 
         for stage in range(stages):
             root.after(350 + stage * 350, lambda s=stage: tick(s))
@@ -159,6 +159,65 @@ def ui(tmp_path, monkeypatch, width=480, height=853, *, api_settings=None):
         snapshot=snapshot,
         run=run,
     )
+
+
+@pytest.mark.parametrize("action", ["shutdown", "shutdown_denied", "exit_app"])
+def test_shutdown_confirms_and_waits_for_station_cleanup(tmp_path, monkeypatch, request, action):
+    if isolated_ui_case(request):
+        return
+    from tkinter import messagebox
+
+    from parcel_dimensioner import touchscreen
+
+    app = ui(tmp_path, monkeypatch)
+    prompts, poweroffs, failures = [], [], []
+
+    def confirm(title, message, **kwargs):
+        assert "power off the Pi" in message
+        assert kwargs["default"] == messagebox.NO
+        prompts.append(title)
+        return len(prompts) > 1
+
+    def run_poweroff(command, **kwargs):
+        assert app.shared.worker.stopping.is_set() and not app.shared.worker.is_alive()
+        assert kwargs["check"] is True
+        poweroffs.append(command)
+        if action == "shutdown_denied":
+            raise subprocess.CalledProcessError(1, command, stderr="Access denied")
+
+    monkeypatch.setattr(touchscreen, "sys", SimpleNamespace(platform="linux"))
+    monkeypatch.setattr(touchscreen.subprocess, "run", run_poweroff)
+    monkeypatch.setattr(messagebox, "askyesno", confirm)
+    monkeypatch.setattr(messagebox, "showerror", lambda title, detail, **_: failures.append(detail))
+
+    def check(stage):
+        if stage == 0:
+            app.button("Shutdown").invoke()
+            assert not app.shared.worker.stopping.is_set()
+            assert not app.shared.worker.paused.is_set()
+        elif stage == 1:
+            app.shared.hold_worker_open = True
+            if action == "exit_app":
+                app.button("More").invoke()
+            else:
+                app.button("Shutdown").invoke()
+                assert "Shutting down…" in app.texts()
+        elif stage == 2:
+            if action == "exit_app":
+                app.button("Exit app").invoke()
+            assert app.shared.worker.stopping.is_set()
+        elif stage == 3:
+            assert not poweroffs and app.button("Shutdown").cget("state") == "disabled"
+            app.shared.hold_worker_open = False
+
+    app.run(check, stages=4)
+    assert poweroffs == ([] if action == "exit_app" else [["systemctl", "poweroff"]])
+    assert len(prompts) == (1 if action == "exit_app" else 2)
+    if action == "shutdown_denied":
+        (failure,) = failures
+        assert "Access denied" in failure
+    else:
+        assert not failures
 
 
 @pytest.mark.parametrize("width,height", [(480, 853), (1000, 680)])
@@ -201,13 +260,16 @@ def test_capture_request_is_visible_and_binds_measure_tap(
         elif stage == 1:
             badge = notice("Capture requested")
             assert badge is not None and badge.cget("bg") != badge.master.cget("bg")
+            assert badge.winfo_width() >= width - 30
+            assert int(badge.tk.call("font", "actual", badge.cget("font"), "-size")) >= 22
             app.snapshot(f"api-request-{width}.png")
             app.button("Continue without barcode").invoke()
         elif stage == 2:
             app.button("Measure box").invoke()
             assert app.commands == ["empty", "skip", ("scan", ("requested-box", None))]
         elif stage == 3:
-            assert notice("Requested capture in progress") is not None
+            assert notice("Capture in progress") is not None
+            assert app.button("Shutdown").cget("state") == "disabled"
             app.shared.worker.events.put(("weight_error", ("Weight is still settling.", True)))
         elif stage == 4:
             assert "Weight unavailable" in app.texts()
@@ -226,11 +288,12 @@ def test_capture_request_is_visible_and_binds_measure_tap(
             assert "Measurement saved" in app.texts()
             assert "Ready for the receiving app." in app.texts()
             assert "Barcode skipped" in app.texts()
-            assert notice("Capture requested · Tap Next box") is None
+            assert notice("Capture requested") is None
             app.snapshot(f"api-result-{width}.png")
             app.shared.worker.events.put(("capture_request", ("next-box", True)))
         elif stage == 7:
-            assert notice("Capture requested · Tap Next box") is not None
+            assert notice("Capture requested") is not None
+            assert "Tap Next box to continue." in app.texts()
             assert app.button("Next box").cget("state") == "normal"
             app.snapshot(f"api-next-request-{width}.png")
 
@@ -311,8 +374,8 @@ def test_automatic_label_measure_and_next_box_layout(tmp_path, monkeypatch, requ
                 if isinstance(w, app.tk.Button) and w.winfo_ismapped()
             ]
             assert "Scan label" not in visible and "Zero scale" not in visible
-            assert visible == ["Exit", "Capture empty station", "More"] or set(visible) == {
-                "Exit",
+            assert set(visible) == {
+                "Shutdown",
                 "Capture empty station",
                 "More",
             }

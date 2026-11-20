@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import queue
 import sqlite3
+import subprocess
+import sys
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -28,11 +30,25 @@ _STATUS_STYLE = {
 }
 
 
+def _poweroff():
+    if not sys.platform.startswith("linux"):
+        raise OSError("Shutdown is available on the Raspberry Pi desktop.")
+    subprocess.run(
+        ["systemctl", "poweroff"],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+
+
 def launch_touchscreen(
     settings, captures_dir: Path, *, scale_settings=None, api_settings=None, windowed=False
 ):
     try:
         import tkinter as tk
+        from tkinter import messagebox
 
         from PIL import Image, ImageDraw, ImageTk
     except ImportError as exc:
@@ -58,6 +74,7 @@ def launch_touchscreen(
         empty=False,
         busy=True,
         closing=False,
+        poweroff=False,
         editing=False,
         menu=None,
         phase="setup",
@@ -114,9 +131,10 @@ def launch_touchscreen(
         status_panel,
         bg="#ffcf87",
         fg="#251b10",
-        font=("Sans", 12, "bold"),
-        padx=7,
-        pady=2,
+        font=("Sans", 23 if portrait else 22, "bold"),
+        anchor="w",
+        padx=11,
+        pady=4,
         justify="left",
     )
     identity = tk.Frame(root, bg="#193442")
@@ -160,10 +178,11 @@ def launch_touchscreen(
     footer.pack(side="bottom", pady=(6, 10), padx=12)
     footer.columnconfigure(0, weight=1)
 
+    def controls_available():
+        return not (state["busy"] or state["closing"] or state["editing"])
+
     def idle():
-        return (
-            state["ready"] and not state["busy"] and not state["closing"] and not state["editing"]
-        )
+        return state["ready"] and controls_available()
 
     def set_status(message, *, alert=None, tone="warning"):
         state.update(status_message=message, request_ended=False)
@@ -181,13 +200,13 @@ def launch_touchscreen(
         continue_button.pack_forget()
         request_active = state["request_id"] is not None and state["ready"] and not state["closing"]
         if request_active:
-            notice = "Capture requested"
-            if state["measuring_request_id"] is not None:
-                notice = "Requested capture in progress"
-            elif state["phase"] == "result":
-                notice = "Capture requested · Tap Next box"
+            notice = (
+                "Capture in progress"
+                if state["measuring_request_id"] is not None
+                else "Capture requested"
+            )
             request_notice.configure(text=notice)
-            request_notice.pack(anchor="w", padx=11, pady=(6, 0), before=headline_label)
+            request_notice.pack(fill="x", before=headline_label)
         else:
             request_notice.pack_forget()
         if api_enabled and state["phase"] == "label" and idle():
@@ -235,7 +254,7 @@ def launch_touchscreen(
         else:
             title = "2 · Place box in corner"
         if state["closing"]:
-            title = "Closing…"
+            title = "Shutting down…" if state["poweroff"] else "Closing…"
         tone = "request" if request_active else "normal"
         if state["phase"] == "result" and not request_active and not state["closing"]:
             tone = "success"
@@ -246,6 +265,9 @@ def launch_touchscreen(
         if state["alert"]:
             title, tone = state["alert"]
             detail = state["status_message"]
+        if request_active and state["phase"] == "result":
+            next_box = "Tap Next box to continue."
+            detail = f"{detail} {next_box}" if state["alert"] else next_box
         background, border, heading, message = _STATUS_STYLE[tone]
         status_panel.configure(bg=background, highlightbackground=border, highlightcolor=border)
         headline_label.configure(bg=background, fg=heading)
@@ -271,7 +293,9 @@ def launch_touchscreen(
             state="normal" if idle() and state["phase"] != "label" else "disabled",
             bg="#009c57" if ready_to_measure else "#007b70",
         )
-        more_button.configure(state="normal" if idle() else "disabled")
+        controls = "normal" if controls_available() else "disabled"
+        more_button.configure(state=controls)
+        shutdown_button.configure(state=controls)
         edit_button.configure(state="normal" if idle() and target else "disabled")
         review_button.configure(
             state="normal" if idle() else "disabled",
@@ -390,7 +414,7 @@ def launch_touchscreen(
         open_package_id_editor(root, target, save, closed)
 
     def more():
-        if not idle() or state["menu"] is not None:
+        if not controls_available() or state["menu"] is not None:
             return
         worker.paused.set()
         dialog = tk.Toplevel(root)
@@ -416,11 +440,12 @@ def launch_touchscreen(
             submit(action)
             worker.paused.clear()
 
-        barcode_options = state["empty"] and not state["barcode_already_scanned"]
+        barcode_options = idle() and state["empty"] and not state["barcode_already_scanned"]
+        can_edit_id = barcode_options or (idle() and state["result"] is not None)
         options = (
-            ("Capture empty station", lambda: perform("empty"), True),
-            ("Zero scale", lambda: perform("zero"), True),
-            ("Enter / edit ID", edit_package, barcode_options or state["result"] is not None),
+            ("Capture empty station", lambda: perform("empty"), idle()),
+            ("Zero scale", lambda: perform("zero"), idle()),
+            ("Enter / edit ID", edit_package, can_edit_id),
             ("Rescan label", lambda: perform("clear_label"), barcode_options),
             ("Measure without barcode", lambda: perform("skip"), barcode_options),
             ("Exit app", close, True),
@@ -459,14 +484,43 @@ def launch_touchscreen(
         ]
         refresh()
 
-    def close():
+    def close(*, poweroff=False):
         if state["closing"]:
             return
         close_menu()
-        state["closing"] = True
+        state.update(closing=True, poweroff=poweroff)
         worker.stopping.set()
-        set_status("Closing camera and scale…")
+        set_status("Closing the scanner and releasing devices…")
         refresh()
+
+    def confirm_shutdown():
+        if not controls_available():
+            return
+        worker.paused.set()
+        confirmed = messagebox.askyesno(
+            "Shut down Raspberry Pi?",
+            "This will close Box Scanner and power off the Pi.",
+            default=messagebox.NO,
+            parent=root,
+        )
+        worker.paused.clear()
+        if confirmed:
+            close(poweroff=True)
+
+    def finish_close():
+        if state["poweroff"]:
+            try:
+                _poweroff()
+            except (OSError, subprocess.SubprocessError) as exc:
+                reason = str(exc)
+                if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
+                    reason = exc.stderr.strip()
+                messagebox.showerror(
+                    "Shutdown failed",
+                    f"{reason}\n\nYou can shut down from the Raspberry Pi desktop.",
+                    parent=root,
+                )
+        root.destroy()
 
     edit_button = tk.Button(
         identity,
@@ -539,17 +593,18 @@ def launch_touchscreen(
         height=2,
         takefocus=False,
     )
-    exit_button = tk.Button(
+    shutdown_button = tk.Button(
         preview_frame,
-        text="Exit",
-        command=close,
+        text="Shutdown",
+        command=confirm_shutdown,
         font=("Sans", 11, "bold"),
         bg="#543f4a",
         fg="white",
+        disabledforeground="#a0acb4",
         relief="flat",
         takefocus=False,
     )
-    exit_button.place(relx=1, x=-8, y=8, anchor="ne", width=64, height=64)
+    shutdown_button.place(relx=1, x=-8, y=8, anchor="ne", width=104, height=64)
     root.protocol("WM_DELETE_WINDOW", close)
     root.bind("<Escape>", lambda event: close())
 
@@ -757,14 +812,11 @@ def launch_touchscreen(
                         set_status(
                             payload + " Reopen Box Scanner.", alert="Camera stopped", tone="error"
                         )
-                elif event == "closed" and state["closing"]:
-                    root.destroy()
-                    return
                 refresh()
         except queue.Empty:
             pass
         if state["closing"] and not worker.is_alive():
-            root.destroy()
+            finish_close()
             return
         # The saved weight appears only in the result cards; this is current scale state.
         scale = getattr(worker, "scale", None)

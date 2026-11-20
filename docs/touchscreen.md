@@ -87,9 +87,10 @@ at startup and locks that position; keep the wall patterns clearly visible.
    The app then pauses reading and restores normal station focus/exposure.
    If the receiving app already scanned the barcode and sends that flag with
    its capture request, the touchscreen goes straight to **Measure box**.
-   The status panel below the preview highlights incoming requests and gives
-   the next action. When a requested scan is saved, the panel says it is ready
-   for the receiving app. A cancelled or expired request shows an alert.
+   The status panel below the preview shows incoming requests in a large amber
+   banner and gives the next action. When a requested scan is saved, the panel
+   says it is ready for the receiving app. A cancelled or expired request shows
+   an alert.
 4. Put that same box snugly against both walls and remove your hands. Tap
    **Measure box**. The app waits for stable weight, captures the image, and
    verifies weight across capture before calculating dimensions. The preview
@@ -120,9 +121,10 @@ at startup and locks that position; keep the wall patterns clearly visible.
 8. If weight cannot be obtained, retry with **Measure box**, or explicitly tap
    **Measure dimensions only**. That takes a new image and saves weight as
    unavailable with the reason. There is no silent fallback or reused old weight.
-9. Tap the square **Exit** button in the preview's upper-right to close both
-   camera and scale. The main action changes with the current step; **More**
-   keeps setup and correction controls out of the normal two-step workflow.
+9. Tap **Shutdown** in the preview's upper-right and confirm to power off the Pi.
+   Box Scanner finishes closing its camera, scale, and API before asking
+   Raspberry Pi OS to shut down. Wait for the Pi to finish shutting down before
+   disconnecting power. Use **More > Exit app** to return to the desktop.
 
 A failed scan clears the previous dimensions so they cannot be mistaken for
 the new box. A pending label is retained for a retry; More > Rescan label discards it.
