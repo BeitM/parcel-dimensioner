@@ -1,0 +1,26 @@
+meta {
+  name: List measurements
+  type: http
+  seq: 6
+}
+
+get {
+  url: {{baseUrl}}/measurements?limit=100
+  body: none
+  auth: inherit
+}
+
+params:query {
+  limit: 100
+}
+
+script:post-response {
+  if (res.getStatus() === 200) {
+    bru.setVar("historyCursor", res.getBody().nextCursor);
+  }
+}
+
+docs {
+  Starts at the earliest saved measurement and stores `nextCursor` in Bruno
+  for **Continue history**. This includes requested and standalone scans.
+}

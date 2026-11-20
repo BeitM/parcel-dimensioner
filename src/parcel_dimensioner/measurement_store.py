@@ -9,11 +9,13 @@ import shutil
 import sqlite3
 import threading
 import time
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
+
+from parcel_dimensioner.photo_retention import _SCAN, _STATION
 
 REQUEST_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 _CURSOR = re.compile(r"([a-f0-9]{32}):(0|[1-9][0-9]{0,18})")
@@ -51,6 +53,13 @@ def _request_record(row):
         record["measurementId"] = row["measurement_id"]
     if row["reason"]:
         record["reason"] = row["reason"]
+    return record
+
+
+def _measurement_record(row):
+    record = json.loads(row["payload"])
+    if row["image_path"] is not None:
+        record["imageUrl"] = f"/api/v1/measurements/{record['measurementId']}/image"
     return record
 
 
@@ -108,13 +117,14 @@ class MeasurementStore:
         self._attempt: CaptureAttempt | None = None
         self._reference_ready = False
         path.parent.mkdir(parents=True, exist_ok=True)
+        self._captures_root = path.parent.resolve()
         with self._transaction() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS station (
                 singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                 device_id TEXT NOT NULL, generation TEXT NOT NULL)""")
             db.execute("""CREATE TABLE IF NOT EXISTS measurements (
                 position INTEGER PRIMARY KEY AUTOINCREMENT,
-                id TEXT UNIQUE NOT NULL, payload TEXT NOT NULL)""")
+                id TEXT UNIQUE NOT NULL, payload TEXT NOT NULL, image_path TEXT)""")
             db.execute("""CREATE TABLE IF NOT EXISTS requests (
                 id TEXT PRIMARY KEY, ttl INTEGER NOT NULL, created REAL NOT NULL,
                 expires REAL NOT NULL, state TEXT NOT NULL, measurement_id TEXT, reason TEXT)""")
@@ -127,7 +137,44 @@ class MeasurementStore:
                     "api.device_id differs from the saved measurement history's device ID"
                 )
             self._generation = station["generation"]
+            if "image_path" not in {row["name"] for row in db.execute(
+                "PRAGMA table_info(measurements)"
+            )}:
+                db.execute("ALTER TABLE measurements ADD COLUMN image_path TEXT")
+                self._link_existing_images(db)
             self._interrupt_requests(db, "station_restarted")
+
+    def _box_photo(self, relative):
+        parts = Path(relative).parts
+        if (
+            len(parts) != 3
+            or not _STATION.fullmatch(parts[0])
+            or not _SCAN.fullmatch(parts[1])
+            or parts[2] != "box.jpg"
+        ):
+            return None
+        image = self._captures_root.joinpath(*parts)
+        # Only serve the station's own regular files, never a symlink target.
+        with suppress(OSError, RuntimeError):
+            if image.resolve() == image and image.is_file():
+                return image
+        return None
+
+    def _link_existing_images(self, db):
+        for image in self._captures_root.glob("station-*/scan-*/box.jpg"):
+            relative = image.relative_to(self._captures_root)
+            saved = image.with_name("result.json")
+            if self._box_photo(relative) is None or saved.is_symlink() or not saved.is_file():
+                continue
+            try:
+                scan_id = json.loads(saved.read_text(encoding="utf-8"))["scan_id"]
+            except (OSError, ValueError, TypeError, KeyError):
+                continue
+            if isinstance(scan_id, str):
+                db.execute(
+                    "UPDATE measurements SET image_path=? WHERE id=? AND image_path IS NULL",
+                    (relative.as_posix(), scan_id),
+                )
 
     @contextmanager
     def _transaction(self):
@@ -255,14 +302,22 @@ class MeasurementStore:
             self._attempt = CaptureAttempt(request_id)
             return self._attempt
 
-    def complete(self, attempt, result, captured_at):
+    def complete(self, attempt, result, captured_at, *, image_path=None):
         record = _make_measurement(result, self.device_id, attempt.request_id, captured_at)
+        relative = None
+        if image_path is not None:
+            root = self.path.parent.absolute()
+            image_path = image_path.absolute()
+            if image_path.is_relative_to(root):
+                candidate = image_path.relative_to(root)
+                if self._box_photo(candidate) is not None:
+                    relative = candidate.as_posix()
         with self._lock:
             self._require_attempt(attempt)
             with self._transaction() as db:
                 db.execute(
-                    "INSERT INTO measurements (id, payload) VALUES (?, ?)",
-                    (record["measurementId"], json.dumps(record, allow_nan=False)),
+                    "INSERT INTO measurements (id, payload, image_path) VALUES (?, ?, ?)",
+                    (record["measurementId"], json.dumps(record, allow_nan=False), relative),
                 )
                 if attempt.request_id is not None:
                     updated = db.execute(
@@ -293,14 +348,29 @@ class MeasurementStore:
         if self._attempt is not attempt:
             raise RuntimeError("Capture attempt is no longer active")
 
-    def measurement(self, measurement_id):
+    def _measurement_row(self, measurement_id):
         with self._transaction() as db:
             row = db.execute(
-                "SELECT payload FROM measurements WHERE id=?", (measurement_id,)
+                "SELECT payload, image_path FROM measurements WHERE id=?", (measurement_id,)
             ).fetchone()
             if row is None:
                 raise ApiError(404, "not_found", "Measurement not found.")
-            return json.loads(row["payload"])
+            return row
+
+    def measurement(self, measurement_id):
+        return _measurement_record(self._measurement_row(measurement_id))
+
+    def open_image(self, measurement_id):
+        relative = self._measurement_row(measurement_id)["image_path"]
+        if relative is None:
+            raise ApiError(404, "image_not_found", "This measurement has no saved box photo.")
+        path = self._box_photo(relative)
+        if path is not None:
+            try:
+                return path.open("rb")
+            except FileNotFoundError:
+                pass  # Retention can remove the photo between lookup and open.
+        raise ApiError(410, "image_unavailable", "The box photo is no longer available.")
 
     def history(self, after, limit):
         position = 0
@@ -317,14 +387,14 @@ class MeasurementStore:
                 if generation != self._generation or position > newest:
                     raise ApiError(410, "cursor_expired", "This history position is unavailable.")
             rows = db.execute(
-                "SELECT position, payload FROM measurements "
+                "SELECT position, payload, image_path FROM measurements "
                 "WHERE position>? ORDER BY position LIMIT ?",
                 (position, limit + 1),
             ).fetchall()
         page = rows[:limit]
         last = page[-1]["position"] if page else position
         return {
-            "items": [json.loads(row["payload"]) for row in page],
+            "items": [_measurement_record(row) for row in page],
             "nextCursor": f"{self._generation}:{last}",
             "hasMore": len(rows) > limit,
         }

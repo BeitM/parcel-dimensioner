@@ -100,11 +100,22 @@ has this shape.
   "requestId": "req-7b82a941",
   "capturedAt": "2026-11-18T14:30:00.000Z",
   "status": "complete",
+  "imageUrl": "/api/v1/measurements/692860bfa95241dd9f454cc00208f99a/image",
   "barcodeStatus": "read",
   "barcode": {"value": "00123456789012", "symbology": "ITF"},
   "dimensions": {"length": 18.25, "width": 12.5, "height": 10.0, "unit": "in"},
   "weight": {"value": 14.62, "unit": "lb", "basis": "gross"}
 }
+```
+
+If the measurement includes `imageUrl`, download its box photo with the same
+bearer token. The URL is relative to the API server's origin. In the laptop
+test, `$api` already includes `/api/v1`, so this command builds the equivalent
+URL from the measurement ID and saves the original JPEG.
+
+```powershell
+Invoke-WebRequest -Uri "$api/measurements/$($request.measurementId)/image" `
+    -Headers $auth -OutFile "box-$($request.measurementId).jpg"
 ```
 
 Run a second scan without posting a request. It appears in history without a
@@ -136,6 +147,7 @@ or address covered by the certificate and a trust chain it can validate. Use
 | `GET /capture-requests/{requestId}` | Returns `pending`, `capturing`, `completed`, `cancelled`, `expired`, or `interrupted`. Use the completed request’s `measurementId` to fetch the result. |
 | `POST /capture-requests/{requestId}/cancel` | Cancels a pending request. Repeating a successful cancellation returns the same terminal state. A capture already in progress returns 409. |
 | `GET /measurements/{measurementId}` | Returns one immutable measurement. |
+| `GET /measurements/{measurementId}/image` | Returns the original box photo as `image/jpeg`. HTTP 404 means the ID is unknown or the measurement has no linked photo. HTTP 410 `image_unavailable` means a previously linked photo is gone. |
 | `GET /measurements?after={cursor}&limit=100` | Returns `items`, `nextCursor`, and `hasMore` in insertion order. Limit accepts 1–500. Begin without `after`. |
 
 Save the request ID and draft association before posting. After a network
@@ -169,8 +181,11 @@ unassigned inbox. This version uses polling.
   measurement is a local edit. A fresh measurement gets a new ID.
 - The SQLite database is `data/captures/measurement-history.sqlite3` with the
   default captures directory. It retains requests and measurements without
-  automatic expiry of completed history. The separate 48-hour photo cleanup
-  still applies to image files. The API serves measurement data only.
+  automatic expiry of completed history. `imageUrl` is included on measurements
+  with a linked box photo. The API serves that existing JPEG while it is on the
+  Pi, subject to the 48-hour photo cleanup. The measurement stays available
+  after the photo is removed. On upgrade, the station links earlier API
+  measurements to retained box photos by their saved scan IDs.
 - After a restart, the station marks any unfinished requests `interrupted`.
   Completed records and history cursors persist. Capture the empty station
   again before accepting new requests. When disk space drops below 32 MiB,

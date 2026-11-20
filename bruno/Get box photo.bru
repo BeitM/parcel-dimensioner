@@ -1,0 +1,18 @@
+meta {
+  name: Get box photo
+  type: http
+  seq: 5
+}
+
+get {
+  url: {{baseUrl}}/measurements/{{measurementId}}/image
+  body: none
+  auth: inherit
+}
+
+docs {
+  Run **Capture status** after the scan completes to load its measurement ID.
+  The response is the original box JPEG. HTTP 404 means no photo is linked.
+  HTTP 410 means the previously linked photo is gone. The Pi's 48-hour photo
+  cleanup applies to the JPEG and the measurement stays available.
+}

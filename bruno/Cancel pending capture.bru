@@ -1,0 +1,17 @@
+meta {
+  name: Cancel pending capture
+  type: http
+  seq: 8
+}
+
+post {
+  url: {{baseUrl}}/capture-requests/{{requestId}}/cancel
+  body: none
+  auth: inherit
+}
+
+docs {
+  Cancels the request created by **Request capture** while it is still
+  pending. A successful response has state `cancelled`. Once the operator
+  starts the scan, the station rejects cancellation with HTTP 409.
+}

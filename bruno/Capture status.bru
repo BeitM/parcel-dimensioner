@@ -1,0 +1,24 @@
+meta {
+  name: Capture status
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseUrl}}/capture-requests/{{requestId}}
+  body: none
+  auth: inherit
+}
+
+script:post-response {
+  const body = res.getBody();
+  if (res.getStatus() === 200 && body.state === "completed") {
+    bru.setVar("measurementId", body.measurementId);
+  }
+}
+
+docs {
+  Uses the ID from **Request capture**. Send again if the state is `pending`
+  or `capturing`. When the state is `completed`, Bruno saves the returned
+  measurement ID for **Get measurement**.
+}

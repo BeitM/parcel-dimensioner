@@ -522,7 +522,7 @@ class ScanSession:
             self._save_result(folder, result)
             if publish is not None:
                 try:
-                    publish(result, captured_at)
+                    publish(result, captured_at, image_path=path)
                 except Exception:
                     # Without a committed API result this is a failed attempt.
                     with suppress(OSError):

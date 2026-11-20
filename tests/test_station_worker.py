@@ -290,6 +290,9 @@ def test_requested_scan_uses_station_capture_and_requires_weight(tmp_path, monke
         assert completed["state"] == "completed"
         assert completed["measurementId"] == result["scan_id"]
         measurement = store.measurement(completed["measurementId"])
+        assert measurement["imageUrl"].endswith(f"/{completed['measurementId']}/image")
+        with store.open_image(completed["measurementId"]) as photo:
+            assert photo.read(2) == b"\xff\xd8"
         assert measurement["barcodeStatus"] == "skipped"
         assert measurement["weight"]["value"] == 8.5
         assert measurement["dimensions"]["height"] == 10

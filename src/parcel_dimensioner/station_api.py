@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hmac
 import json
+import os
 import re
+import shutil
 import sqlite3
 import ssl
 import subprocess
@@ -18,7 +20,7 @@ from urllib.parse import parse_qs, urlsplit
 from parcel_dimensioner.measurement_store import REQUEST_ID, ApiError
 
 _REQUEST = re.compile(r"/api/v1/capture-requests/([^/]+)(/cancel)?")
-_MEASUREMENT = re.compile(r"/api/v1/measurements/([a-fA-F0-9-]{32,36})")
+_MEASUREMENT = re.compile(r"/api/v1/measurements/([a-fA-F0-9-]{32,36})(/image)?")
 _MAX_BODY_BYTES = 4096
 
 
@@ -56,14 +58,25 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _send(self, status, data):
         body = json.dumps(data, allow_nan=False).encode("utf-8")
+        self._send_headers(status, "application/json", len(body))
+        self.wfile.write(body)
+
+    def _send_headers(self, status, content_type, length):
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", content_type)
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Length", str(length))
         if status == 401:
             self.send_header("WWW-Authenticate", "Bearer")
         self.end_headers()
-        self.wfile.write(body)
+
+    def _send_image(self, measurement_id):
+        with self.server.store.open_image(measurement_id) as image:
+            size = os.fstat(image.fileno()).st_size
+            # Headers are committed once streaming starts. A disconnected client can retry.
+            with suppress(OSError):
+                self._send_headers(200, "image/jpeg", size)
+                shutil.copyfileobj(image, self.wfile, length=64 * 1024)
 
     def _handle(self, method):
         try:
@@ -72,7 +85,10 @@ class _Handler(BaseHTTPRequestHandler):
                 headers[0].encode("utf-8"), self.server.authorization
             ):
                 raise ApiError(401, "unauthorized", "A valid bearer token is required.")
-            status, payload = self._dispatch(method)
+            response = self._dispatch(method)
+            if response is None:
+                return  # The image response was streamed already.
+            status, payload = response
         except ApiError as exc:
             status, payload = exc.status, exc.payload
         except (sqlite3.Error, OSError):
@@ -140,6 +156,9 @@ class _Handler(BaseHTTPRequestHandler):
                 raise _invalid("limit must be an integer from 1 to 500.")
             return 200, store.history(query.get("after", [None])[0], int(limit))
         if method == "GET" and (measurement := _MEASUREMENT.fullmatch(path)):
+            if measurement[2]:
+                self._send_image(measurement[1])
+                return None
             return 200, store.measurement(measurement[1])
         if method == "GET" and path == "/api/v1/health":
             return 200, {

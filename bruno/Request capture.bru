@@ -1,0 +1,32 @@
+meta {
+  name: Request capture
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/capture-requests
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "requestId": "{{requestId}}",
+    "expiresInSeconds": 300
+  }
+}
+
+script:pre-request {
+  bru.setVar("requestId", bru.interpolate("{{$guid}}"));
+  bru.setVar("measurementId", "");
+}
+
+docs {
+  Each send generates a fresh request ID and reserves the next scan for up to
+  five minutes. Expect HTTP 201 and state `pending`. Start the measurement on
+  the touchscreen before the deadline.
+
+  If the response times out, send **Capture status** first. It uses the ID
+  already generated for this attempt.
+}

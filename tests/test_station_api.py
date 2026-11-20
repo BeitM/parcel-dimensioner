@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
@@ -50,7 +51,7 @@ def http_station(tmp_path):
     server = StationApiServer(settings, store)
     server.start()
 
-    def call(method, path, body=None, *, token=TOKEN):
+    def call(method, path, body=None, *, token=TOKEN, raw=False):
         headers = {"Authorization": f"Bearer {token}"} if token is not None else {}
         if body is not None:
             headers["Content-Type"] = "application/json"
@@ -63,7 +64,10 @@ def http_station(tmp_path):
                 headers=headers,
             )
             response = client.getresponse()
-            return response.status, json.loads(response.read())
+            data = response.read()
+            if raw:
+                return response.status, response.headers, data
+            return response.status, json.loads(data)
         finally:
             client.close()
 
@@ -129,6 +133,61 @@ def test_api_request_capture_and_poll_history(http_station):
         {"items": [], "nextCursor": second["nextCursor"], "hasMore": False},
     )
     assert call("GET", "/measurements?after=broken")[0] == 400
+
+
+def test_box_photo_requires_auth_and_survives_only_while_file_is_retained(http_station):
+    store, call = http_station
+    photo = store.path.parent / "station-20261119T222000-a1b2c3d4/scan-0001/box.jpg"
+    photo.parent.mkdir(parents=True)
+    jpeg = b"\xff\xd8" + b"captured photo" * 6000 + b"\xff\xd9"
+    photo.write_bytes(jpeg)
+    result = captured_box()
+    store.complete(store.begin(None), result, datetime.now(UTC), image_path=photo)
+    measurement_path = f"/measurements/{result['scan_id']}"
+    image_path = measurement_path + "/image"
+    status, measurement = call("GET", measurement_path)
+    assert status == 200 and measurement["imageUrl"] == "/api/v1" + image_path
+    assert call("GET", "/measurements")[1]["items"] == [measurement]
+    assert call("GET", image_path, token=None)[0] == 401
+    status, headers, content = call("GET", image_path, raw=True)
+    assert status == 200 and content == jpeg
+    assert headers["Content-Type"] == "image/jpeg"
+    assert headers["Content-Length"] == str(len(jpeg))
+    assert headers["Cache-Control"] == "no-store"
+
+    photo.unlink()
+    status, missing = call("GET", image_path)
+    assert status == 410 and missing["error"]["code"] == "image_unavailable"
+    assert call("GET", measurement_path) == (200, measurement)
+    assert call("GET", f"/measurements/{uuid4().hex}/image")[0] == 404
+
+
+def test_upgrade_links_only_retained_box_photos_to_existing_measurements(tmp_path):
+    db = tmp_path / "history.sqlite3"
+    old = station(db)
+    retained = captured_box()
+    missing = captured_box()
+    old.complete(old.begin(None), retained, datetime.now(UTC))
+    old.complete(old.begin(None), missing, datetime.now(UTC))
+    cursor = old.history(None, 100)["nextCursor"]
+    with sqlite3.connect(db) as connection:
+        connection.execute("ALTER TABLE measurements DROP COLUMN image_path")
+
+    folder = tmp_path / "station-20261119T222000-a1b2c3d4/scan-0001"
+    folder.mkdir(parents=True)
+    (folder / "result.json").write_text(json.dumps(retained), encoding="utf-8")
+    (folder / "box.jpg").write_bytes(b"original box photo")
+    (folder / "label.jpg").write_bytes(b"close-up label photo")
+    upgraded = station(db)
+    retained_id, missing_id = retained["scan_id"], missing["scan_id"]
+    assert upgraded.measurement(retained_id)["imageUrl"].endswith(f"/{retained_id}/image")
+    with upgraded.open_image(retained_id) as image:
+        assert image.read() == b"original box photo"
+    assert "imageUrl" not in upgraded.measurement(missing_id)
+    with pytest.raises(ApiError) as error:
+        upgraded.open_image(missing_id)
+    assert error.value.status == 404
+    assert upgraded.history(cursor, 100)["items"] == []
 
 
 def test_retry_expiry_restart_and_cursor_recovery(tmp_path):

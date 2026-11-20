@@ -1,0 +1,28 @@
+meta {
+  name: Continue history
+  type: http
+  seq: 7
+}
+
+get {
+  url: {{baseUrl}}/measurements?after={{historyCursor}}&limit=100
+  body: none
+  auth: inherit
+}
+
+params:query {
+  after: {{historyCursor}}
+  limit: 100
+}
+
+script:post-response {
+  if (res.getStatus() === 200) {
+    bru.setVar("historyCursor", res.getBody().nextCursor);
+  }
+}
+
+docs {
+  Uses the cursor from the last history response. Send again while `hasMore`
+  is true, or send after taking more scans to see newly saved measurements.
+  If the station returns `cursor_expired`, restart with **List measurements**.
+}

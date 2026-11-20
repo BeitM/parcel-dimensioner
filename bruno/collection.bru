@@ -1,0 +1,34 @@
+auth {
+  mode: bearer
+}
+
+auth:bearer {
+  token: {{apiToken}}
+}
+
+docs {
+  # Box Scanner API
+
+  Select the **Local SSH** environment and enter the Pi's API token as the
+  `apiToken` secret. The token is stored on the Pi in
+  `~/.config/parcel-dimensioner/api-token`.
+
+  Keep the SSH tunnel open while testing. Replace the IP if the Pi's address
+  has changed.
+
+  ```powershell
+  ssh -N -o ExitOnForwardFailure=yes -L 8765:127.0.0.1:8765 box-scanner@192.168.1.228
+  ```
+
+  Run **Health** to check the connection. Clear the station and tap
+  **Capture empty station** on the touchscreen so `ready` becomes `true`.
+
+  Send **Request capture**. Scan or skip the barcode on the Pi, place the box
+  against both walls, and tap **Measure box**. Then send **Capture status**.
+  After it shows `completed`, send **Get measurement**.
+  Send **Get box photo** to view the original JPEG while the Pi retains it.
+
+  Send these requests individually so you can take the physical measurement
+  before checking completion. To test cancellation, create a separate request
+  and send **Cancel pending capture** before starting that scan.
+}
