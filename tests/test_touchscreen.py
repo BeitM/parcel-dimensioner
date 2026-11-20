@@ -262,8 +262,12 @@ def test_capture_request_is_visible_and_binds_measure_tap(
             assert badge is not None and badge.cget("bg") != badge.master.cget("bg")
             assert badge.winfo_width() >= width - 30
             assert int(badge.tk.call("font", "actual", badge.cget("font"), "-size")) >= 22
+            button = app.button("Continue without barcode")
+            assert int(button.tk.call("font", "actual", button.cget("font"), "-size")) == 15
+            x = button.winfo_rootx() - app.root.winfo_rootx()
+            assert x >= 0 and x + button.winfo_width() <= width
             app.snapshot(f"api-request-{width}.png")
-            app.button("Continue without barcode").invoke()
+            button.invoke()
         elif stage == 2:
             app.button("Measure box").invoke()
             assert app.commands == ["empty", "skip", ("scan", ("requested-box", None))]

@@ -587,10 +587,11 @@ def launch_touchscreen(
         root,
         text="Continue without barcode",
         command=lambda: submit("skip"),
-        font=("Sans", 13, "bold"),
+        font=("Sans", 15, "bold"),
         bg="#345269",
         fg="white",
         height=2,
+        padx=10,
         takefocus=False,
     )
     shutdown_button = tk.Button(
