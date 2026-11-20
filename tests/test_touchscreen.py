@@ -161,36 +161,119 @@ def ui(tmp_path, monkeypatch, width=480, height=853, *, api_settings=None):
     )
 
 
-def test_capture_request_is_visible_and_binds_measure_tap(tmp_path, monkeypatch, request):
+@pytest.mark.parametrize("width,height", [(480, 853), (1000, 680)])
+def test_capture_request_is_visible_and_binds_measure_tap(
+    tmp_path, monkeypatch, request, width, height
+):
     if isolated_ui_case(request):
         return
-    app = ui(tmp_path, monkeypatch, api_settings=SimpleNamespace(enabled=True))
+    app = ui(tmp_path, monkeypatch, width, height, api_settings=SimpleNamespace(enabled=True))
+    record = {
+        "dimensions_inches": {"length": 9, "width": 8, "height": 3},
+        "weight": {"pounds": 5},
+        "barcode": {"status": "skipped"},
+    }
 
     def command(action):
         events = app.shared.worker.events
         if action == "empty":
             events.put(("empty", "Ready"))
-            events.put(("capture_request", "requested-box"))
+            events.put(("capture_request", ("requested-box", False)))
         elif action == "skip":
             events.put(("skip", None))
 
     def check(stage):
+        def notice(text):
+            return next(
+                (
+                    widget
+                    for widget in app.descendants(app.root)
+                    if isinstance(widget, app.tk.Label)
+                    and widget.cget("text") == text
+                    and widget.winfo_ismapped()
+                ),
+                None,
+            )
+
+        app.root.update_idletasks()
         if stage == 0:
             app.button("Capture empty station").invoke()
         elif stage == 1:
-            assert any(
-                isinstance(widget, app.tk.Label)
-                and widget.cget("text") == "Capture requested"
-                and widget.winfo_ismapped()
-                for widget in app.descendants(app.root)
-            )
+            badge = notice("Capture requested")
+            assert badge is not None and badge.cget("bg") != badge.master.cget("bg")
+            app.snapshot(f"api-request-{width}.png")
             app.button("Continue without barcode").invoke()
         elif stage == 2:
             app.button("Measure box").invoke()
             assert app.commands == ["empty", "skip", ("scan", ("requested-box", None))]
+        elif stage == 3:
+            assert notice("Requested capture in progress") is not None
+            app.shared.worker.events.put(("weight_error", ("Weight is still settling.", True)))
+        elif stage == 4:
+            assert "Weight unavailable" in app.texts()
+            assert notice("Capture requested") is not None
+            for button in ("Measure dimensions only", "Measure box", "More"):
+                widget = app.button(button)
+                y = widget.winfo_rooty() - app.root.winfo_rooty()
+                assert y >= 0 and y + widget.winfo_height() <= height
+                assert widget.cget("state") == "normal"
+            app.snapshot(f"api-weight-alert-{width}.png")
+            app.button("Measure box").invoke()
+        elif stage == 5:
+            app.shared.worker.events.put(("result", (record, app.shared.review)))
+            app.shared.worker.events.put(("capture_request", None))
+        elif stage == 6:
+            assert "Measurement saved" in app.texts()
+            assert "Ready for the receiving app." in app.texts()
+            assert "Barcode skipped" in app.texts()
+            assert notice("Capture requested · Tap Next box") is None
+            app.snapshot(f"api-result-{width}.png")
+            app.shared.worker.events.put(("capture_request", ("next-box", True)))
+        elif stage == 7:
+            assert notice("Capture requested · Tap Next box") is not None
+            assert app.button("Next box").cget("state") == "normal"
+            app.snapshot(f"api-next-request-{width}.png")
 
     app.shared.on_command = command
-    app.run(check, stages=3)
+    app.run(check, stages=8)
+
+
+def test_already_scanned_request_goes_directly_to_measure_and_resets_on_cancel(
+    tmp_path, monkeypatch, request
+):
+    if isolated_ui_case(request):
+        return
+    app = ui(tmp_path, monkeypatch, api_settings=SimpleNamespace(enabled=True))
+
+    def command(action):
+        if action == "empty":
+            events = app.shared.worker.events
+            events.put(("empty", "Ready"))
+            events.put(("label", label_result("STALE-LABEL")))
+
+    def check(stage):
+        events = app.shared.worker.events
+        if stage == 0:
+            app.button("Capture empty station").invoke()
+        elif stage == 1:
+            assert "ID: STALE-LABEL" in app.texts()
+            events.put(("capture_request", ("cancelled", True)))
+        elif stage == 2:
+            assert "ID: STALE-LABEL" not in app.texts()
+            assert any("Barcode already scanned" in text for text in app.texts())
+            assert app.button("Measure box").cget("state") == "normal"
+            events.put(("capture_request", None))
+        elif stage == 3:
+            assert "Capture request ended" in app.texts()
+            assert app.button("Waiting for barcode").cget("state") == "disabled"
+            app.snapshot("api-request-ended.png")
+            events.put(("capture_request", ("requested-box", True)))
+        elif stage == 4:
+            app.button("Measure box").invoke()
+            assert app.commands == ["empty", ("scan", ("requested-box", None))]
+
+    app.shared.on_command = command
+    app.run(check, stages=5)
 
 
 @pytest.mark.parametrize("width,height", [(480, 853), (720, 1280), (1000, 680)])

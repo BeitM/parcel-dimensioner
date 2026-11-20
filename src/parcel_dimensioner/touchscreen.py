@@ -18,6 +18,15 @@ from parcel_dimensioner.review import box_detail
 from parcel_dimensioner.settings import ScaleSettings
 from parcel_dimensioner.station_worker import StationWorker
 
+# Background, border, heading, and message colors for the operator status panel.
+_STATUS_STYLE = {
+    "normal": ("#152a38", "#2b4150", "#f4f8fa", "#c3d6e2"),
+    "request": ("#1c2b3a", "#b98645", "#f5f8fb", "#d6e2ec"),
+    "success": ("#17332e", "#397565", "#8fe5cd", "#d2eee6"),
+    "warning": ("#372a1c", "#bf8544", "#ffdb9b", "#ffeacb"),
+    "error": ("#39242c", "#b56b78", "#ffc4cb", "#ffe2e6"),
+}
+
 
 def launch_touchscreen(
     settings, captures_dir: Path, *, scale_settings=None, api_settings=None, windowed=False
@@ -65,6 +74,11 @@ def launch_touchscreen(
         beep_id=None,
         confirm_until=0,
         request_id=None,
+        barcode_already_scanned=False,
+        measuring_request_id=None,
+        request_ended=False,
+        status_message="Connecting to the station.",
+        alert=None,
     )
     portrait = root.winfo_screenheight() > root.winfo_screenwidth()
     font = 18 if portrait else 16
@@ -74,28 +88,37 @@ def launch_touchscreen(
     preview = tk.Label(preview_frame, bg="#08131b")
     preview.pack(fill="both", expand=True)
 
+    status_panel = tk.Frame(root, bg="#152a38", highlightthickness=1, highlightbackground="#2b4150")
+    status_panel.pack(fill="x", padx=12, pady=(1, 4))
     headline = tk.StringVar(value="Starting camera…")
     headline_label = tk.Label(
-        root,
+        status_panel,
         textvariable=headline,
-        bg="#10202c",
-        fg="white",
-        font=("Sans", 22 if portrait else 20, "bold"),
+        font=("Sans", 21 if portrait else 19, "bold"),
+        anchor="w",
+        justify="left",
         wraplength=600,
     )
-    headline_label.pack(fill="x", padx=12, pady=(3, 2))
-    status = tk.StringVar(value="Connecting to the station.")
+    headline_label.pack(fill="x", padx=10, pady=(3, 0))
+    status = tk.StringVar(value=state["status_message"])
     status_label = tk.Label(
-        root,
+        status_panel,
         textvariable=status,
-        bg="#10202c",
-        fg="#c3d6e2",
-        font=("Sans", font),
+        font=("Sans", 15 if portrait else 13),
+        anchor="w",
         wraplength=600,
-        justify="center",
+        justify="left",
     )
-    status_label.pack(fill="x", padx=14, pady=(0, 6))
-    request_notice = tk.Label(root, bg="#10202c", fg="#ffca78", font=("Sans", 13, "bold"))
+    status_label.pack(fill="x", padx=10, pady=(0, 6))
+    request_notice = tk.Label(
+        status_panel,
+        bg="#ffcf87",
+        fg="#251b10",
+        font=("Sans", 12, "bold"),
+        padx=7,
+        pady=2,
+        justify="left",
+    )
     identity = tk.Frame(root, bg="#193442")
     package_value = tk.StringVar(value="")
     package_label = tk.Label(
@@ -142,6 +165,10 @@ def launch_touchscreen(
             state["ready"] and not state["busy"] and not state["closing"] and not state["editing"]
         )
 
+    def set_status(message, *, alert=None, tone="warning"):
+        state.update(status_message=message, request_ended=False)
+        state["alert"] = (alert, tone) if alert else None
+
     def refresh():
         target = state["pending"] or state["result"] or {}
         value = target.get("package_id")
@@ -151,22 +178,29 @@ def launch_touchscreen(
         review_button.pack_forget()
         scale_label.pack_forget()
         fallback_button.pack_forget()
-        request_notice.pack_forget()
         continue_button.pack_forget()
-        if state["request_id"] is not None and state["ready"]:
-            request_notice.configure(
-                text={
-                    "result": "Capture requested · Tap Next box to continue",
-                    "measure": "Capture requested · Place box and tap Measure",
-                }.get(state["phase"], "Capture requested")
-            )
-            request_notice.pack(fill="x", padx=12, before=status_label)
+        request_active = state["request_id"] is not None and state["ready"] and not state["closing"]
+        if request_active:
+            notice = "Capture requested"
+            if state["measuring_request_id"] is not None:
+                notice = "Requested capture in progress"
+            elif state["phase"] == "result":
+                notice = "Capture requested · Tap Next box"
+            request_notice.configure(text=notice)
+            request_notice.pack(anchor="w", padx=11, pady=(6, 0), before=headline_label)
+        else:
+            request_notice.pack_forget()
         if api_enabled and state["phase"] == "label" and idle():
             continue_button.pack(pady=(2, 0), before=footer)
         if target:
-            package_value.set(
-                "ID: " + (display_text(value, 44) if value else "Choose the correct barcode")
-            )
+            if value:
+                package_value.set("ID: " + display_text(value, 44))
+            elif candidates:
+                package_value.set("Choose the correct barcode")
+            elif target.get("barcode", {}).get("status") == "skipped":
+                package_value.set("Barcode skipped")
+            else:
+                package_value.set("No barcode detected")
             package_label.configure(fg="#71dcc4" if value else "#ffca78")
             edit_button.configure(
                 text="Edit" if value else "Choose ID" if candidates else "Enter ID"
@@ -196,13 +230,29 @@ def launch_touchscreen(
             title = "Measurement saved"
         elif state["busy"]:
             title = "Measuring…"
+        elif state["barcode_already_scanned"]:
+            title = "Place box in corner"
         else:
             title = "2 · Place box in corner"
         if state["closing"]:
             title = "Closing…"
+        tone = "request" if request_active else "normal"
+        if state["phase"] == "result" and not request_active and not state["closing"]:
+            tone = "success"
+        detail = state["status_message"]
+        if state["request_ended"]:
+            title, tone = "Capture request ended", "warning"
+            detail = "Ask the receiving app for a new request to link the next scan."
+        if state["alert"]:
+            title, tone = state["alert"]
+            detail = state["status_message"]
+        background, border, heading, message = _STATUS_STYLE[tone]
+        status_panel.configure(bg=background, highlightbackground=border, highlightcolor=border)
+        headline_label.configure(bg=background, fg=heading)
+        status_label.configure(bg=background, fg=message)
         headline.set(title)
+        status.set(detail)
         ready_to_measure = idle() and state["phase"] == "measure"
-        headline_label.configure(fg="#71dcc4" if state["phase"] == "result" else "white")
         action = (
             "Capture empty station"
             if not state["empty"]
@@ -239,6 +289,8 @@ def launch_touchscreen(
     def submit(action):
         if not idle():
             return
+        if state["barcode_already_scanned"] and action in ("clear_label", "skip"):
+            return
         reason = state["fallback"] if action == "dimensions_only" else None
         if action == "dimensions_only" and reason is None:
             return
@@ -247,18 +299,27 @@ def launch_touchscreen(
             try:
                 command = worker.begin_measurement(state["request_id"], reason)
             except ApiError as exc:
-                status.set(str(exc))
+                if exc.payload["error"]["code"] == "request_changed":
+                    set_status(
+                        "Check the request shown here, then tap Measure box again.",
+                        alert="Capture request changed",
+                    )
+                else:
+                    set_status(str(exc), alert="Capture unavailable", tone="error")
+                refresh()
                 return
             except (sqlite3.Error, OSError):
-                status.set("Could not access measurement storage. Check the Pi and retry.")
+                set_status("Check the Pi and retry.", alert="Storage unavailable", tone="error")
+                refresh()
                 return
+            state["measuring_request_id"] = state["request_id"]
         state.update(busy=True, fallback=None)
         if action in ("empty", "zero", "next", "clear_label", "skip"):
             state["pending"] = None
         if action == "empty":
             state["empty"] = False
         clear_result()
-        status.set(
+        set_status(
             {
                 "empty": "Remove all boxes — capturing empty and zeroing scale…",
                 "zero": "Keep the platform empty and hands off — zeroing…",
@@ -291,7 +352,7 @@ def launch_touchscreen(
             worker.paused.clear()
 
     def edit_package():
-        if not idle():
+        if not idle() or (state["barcode_already_scanned"] and state["result"] is None):
             return
         close_menu(resume=False)
         worker.paused.set()
@@ -311,8 +372,10 @@ def launch_touchscreen(
             refresh()
 
         def save(value, index):
+            if (draft or pending) and state["barcode_already_scanned"]:
+                return
             state["busy"] = True
-            status.set("Saving package ID…")
+            set_status("Saving package ID…")
             refresh()
             if draft:
                 worker.commands.put_nowait(("manual_id", value))
@@ -353,12 +416,13 @@ def launch_touchscreen(
             submit(action)
             worker.paused.clear()
 
+        barcode_options = state["empty"] and not state["barcode_already_scanned"]
         options = (
             ("Capture empty station", lambda: perform("empty"), True),
             ("Zero scale", lambda: perform("zero"), True),
-            ("Enter / edit ID", edit_package, state["empty"]),
-            ("Rescan label", lambda: perform("clear_label"), state["empty"]),
-            ("Measure without barcode", lambda: perform("skip"), state["empty"]),
+            ("Enter / edit ID", edit_package, barcode_options or state["result"] is not None),
+            ("Rescan label", lambda: perform("clear_label"), barcode_options),
+            ("Measure without barcode", lambda: perform("skip"), barcode_options),
             ("Exit app", close, True),
         )
         for index, (text, command, enabled) in enumerate(options):
@@ -401,7 +465,7 @@ def launch_touchscreen(
         close_menu()
         state["closing"] = True
         worker.stopping.set()
-        status.set("Closing camera and scale…")
+        set_status("Closing camera and scale…")
         refresh()
 
     edit_button = tk.Button(
@@ -493,8 +557,9 @@ def launch_touchscreen(
         if event.widget is not root:
             return
         width = max(180, event.width - 30)
-        for label in (headline_label, status_label, scale_label, request_notice):
-            label.configure(wraplength=width)
+        for label in (headline_label, status_label, request_notice):
+            label.configure(wraplength=width - 22)
+        scale_label.configure(wraplength=width)
         package_label.configure(wraplength=max(140, width - 115))
         primary_button.configure(wraplength=max(140, min(220, width - 160)))
 
@@ -513,38 +578,54 @@ def launch_touchscreen(
             state["detail"] = box_detail(state["review"], state["result"] or {})
         state["display_key"] = None
 
+    def show_box_step():
+        state.update(pending=None, fallback=None, confirm_until=0)
+        if not state["empty"]:
+            state["phase"] = "setup"
+            set_status("Scale zeroed. Remove all boxes and capture the empty station next.")
+        elif state["barcode_already_scanned"]:
+            state["phase"] = "measure"
+            set_status("Barcode already scanned in the receiving app. Tap Measure box when ready.")
+        else:
+            state["phase"] = "label"
+            set_status("Hold the barcode steady in the guide.")
+
     def poll():
         try:
             while True:
                 event, payload = worker.events.get_nowait()
                 if event == "ready":
                     state.update(ready=True, busy=False, phase="setup")
-                    status.set("Remove all boxes, then capture the empty station.")
+                    set_status("Remove all boxes, then capture the empty station.")
                 elif event == "capture_request":
-                    state["request_id"] = payload
+                    previous_request = state["request_id"]
+                    previous = state["barcode_already_scanned"]
+                    state["request_id"], state["barcode_already_scanned"] = payload or (None, False)
+                    if (
+                        previous != state["barcode_already_scanned"]
+                        and state["empty"]
+                        and state["phase"] != "result"
+                        and not state["busy"]
+                    ):
+                        show_box_step()
+                    state["request_ended"] = previous_request is not None and payload is None
                 elif event in ("empty", "zero", "next"):
-                    state.update(busy=False, pending=None, fallback=None, phase="label")
+                    state["busy"] = False
                     if event == "empty":
                         state["empty"] = True
                     clear_result()
-                    if not state["empty"]:
-                        state["phase"] = "setup"
-                    status.set(
-                        "Hold the barcode close and steady inside the guide. "
-                        "It reads automatically."
-                    )
+                    show_box_step()
                     if event == "empty" and payload and "Scale:" in payload:
-                        status.set(payload)
-                    if not state["empty"]:
-                        status.set(
-                            "Scale zeroed. Remove all boxes and capture the empty station next."
-                        )
+                        set_status(payload, alert="Check the scale")
                 elif event == "listening":
                     state["listening"] = payload
                 elif event == "label_detected":
-                    if not state["closing"]:
+                    if not state["closing"] and not state["barcode_already_scanned"]:
                         state.update(busy=True, phase="preparing", listening=False)
-                        status.set("Label found. Getting the station ready…")
+                        set_status("Label found. Getting the station ready…")
+                elif event == "label" and state["barcode_already_scanned"]:
+                    state["busy"] = False
+                    show_box_step()
                 elif event == "label":
                     if state["closing"]:
                         continue
@@ -555,7 +636,7 @@ def launch_touchscreen(
                     )
                     clear_result()
                     if payload.get("package_id"):
-                        status.set(
+                        set_status(
                             "ID held. Place this box against both walls, remove your hands, "
                             "then tap the green Measure box button."
                         )
@@ -567,13 +648,13 @@ def launch_touchscreen(
                             with suppress(tk.TclError):
                                 barcode_chime(root.bell)
                     else:
-                        status.set(
+                        set_status(
                             "Several codes or an unusable ID were found. "
                             "Choose or enter the package ID."
                         )
                 elif event == "skip":
                     state.update(busy=False, pending=None, phase="measure")
-                    status.set("Barcode skipped. Place the box in the corner and tap Measure box.")
+                    set_status("Barcode skipped. Place the box in the corner and tap Measure box.")
                 elif event == "result":
                     result, path = payload
                     state.update(
@@ -589,22 +670,34 @@ def launch_touchscreen(
                         values[key].set("—" if value is None else f"{value:.2f}″")
                     weight = result.get("weight", {}).get("pounds")
                     values["weight"].set("—" if weight is None else f"{weight:.2f} lb")
+                    completed_request = state["measuring_request_id"]
+                    state["measuring_request_id"] = None
                     note = (
                         "Dimensions and weight saved."
                         if weight is not None
                         else "Dimensions saved; weight unavailable."
                     )
+                    if completed_request is not None and weight is not None:
+                        note = "Ready for the receiving app."
+                        if state["request_id"] == completed_request:
+                            state.update(request_id=None, barcode_already_scanned=False)
                     if api_enabled and weight is None:
-                        note = "Dimensions saved locally. Sharing requires a measured weight."
+                        note = "Sharing requires a measured weight."
                     movement = " ".join(result.get("station_movement_warnings", []))
                     outline = " ".join(result.get("outline_warnings", []))
-                    status.set(
+                    alert = None
+                    if api_enabled and weight is None:
+                        alert = "Dimensions saved locally"
+                    elif movement or outline or getattr(worker, "review_warning", ""):
+                        alert = "Measurement saved"
+                    set_status(
                         " ".join(
                             filter(
                                 None,
                                 (note, movement, outline, getattr(worker, "review_warning", "")),
                             )
-                        )
+                        ),
+                        alert=alert,
                     )
                 elif event == "package_id":
                     result, path = payload
@@ -615,31 +708,55 @@ def launch_touchscreen(
                         if api_enabled and result.get("weight", {}).get("pounds") is not None
                         else "Package ID saved."
                     )
-                    status.set(note + " " + getattr(worker, "review_warning", ""))
+                    warning = getattr(worker, "review_warning", "")
+                    set_status(
+                        " ".join(filter(None, (note, warning))),
+                        alert="Check the marked result" if warning else None,
+                    )
                 elif event == "package_id_error":
                     state["busy"] = False
-                    status.set("Could not save ID: " + payload[0])
+                    set_status(payload[0], alert="Could not save ID", tone="error")
                 elif event == "watch_error":
                     state.update(
                         busy=False, listening=False, phase="label" if api_enabled else "measure"
                     )
-                    status.set(payload + " Use More to enter an ID or retry.")
+                    set_status(
+                        payload + " Use More to enter an ID or retry.",
+                        alert="Barcode reader unavailable",
+                    )
                 elif event in ("error", "weight_error", "zero_error"):
                     message, has_reference = payload
                     state.update(
                         busy=False,
                         empty=has_reference,
                         phase="measure" if has_reference else "setup",
+                        measuring_request_id=None,
                     )
                     clear_result()
-                    status.set(message)
                     if event == "weight_error" and has_reference:
                         state["fallback"] = message
-                        status.set(message + " Retry, or explicitly measure dimensions only.")
-                elif event == "fatal":
+                        set_status(
+                            message + " Tap Measure box to retry.",
+                            alert="Weight unavailable",
+                        )
+                    else:
+                        alert = "Scan needs attention"
+                        if event == "zero_error":
+                            alert = "Scale zero failed"
+                        set_status(message, alert=alert, tone="error")
+                elif event in ("fatal", "api_error"):
                     state.update(ready=False, busy=False, listening=False, pending=None)
                     clear_result()
-                    status.set("Camera stopped: " + payload + " Reopen the app.")
+                    if event == "api_error":
+                        set_status(
+                            payload + " Check the API settings and reopen Box Scanner.",
+                            alert="Station API unavailable",
+                            tone="error",
+                        )
+                    else:
+                        set_status(
+                            payload + " Reopen Box Scanner.", alert="Camera stopped", tone="error"
+                        )
                 elif event == "closed" and state["closing"]:
                     root.destroy()
                     return

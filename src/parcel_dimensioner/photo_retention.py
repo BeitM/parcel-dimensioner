@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-PHOTO_RETENTION_SECONDS = 48 * 60 * 60
+PHOTO_RETENTION_SECONDS = 14 * 24 * 60 * 60
 PHOTO_CLEANUP_INTERVAL_SECONDS = 10 * 60
 
 _STATION = re.compile(r"station-[0-9]{8}T[0-9]{6}-[0-9a-f]{8}")

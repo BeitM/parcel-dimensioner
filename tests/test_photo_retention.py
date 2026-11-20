@@ -13,7 +13,7 @@ def test_photo_cleanup_preserves_scan_records_and_unrelated_images(tmp_path):
     for directory in (review, label, tmp_path / "calibration-20261101"):
         directory.mkdir(parents=True, exist_ok=True)
 
-    expired = datetime.now(UTC) - timedelta(hours=49)
+    expired = datetime.now(UTC) - timedelta(days=14, hours=1)
     for capture in (scan / "box.json", scan / "label.json", label / "label.json"):
         capture.write_text(json.dumps({"captured_at": expired.isoformat()}), encoding="utf-8")
 

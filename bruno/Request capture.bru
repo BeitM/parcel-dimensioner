@@ -27,6 +27,10 @@ docs {
   five minutes. Expect HTTP 201 and state `pending`. Start the measurement on
   the touchscreen before the deadline.
 
+  To simulate a barcode the receiving app already scanned, add
+  `"barcodeAlreadyScanned": true` to the JSON body. The Pi will go straight
+  to **Measure box**. The completed measurement reports `barcodeStatus: skipped`.
+
   If the response times out, send **Capture status** first. It uses the ID
   already generated for this attempt.
 }

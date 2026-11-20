@@ -159,7 +159,10 @@ def test_live_id_is_held_focus_restored_and_next_box_is_deliberate(
         assert not worker.is_alive()
 
 
-def test_requested_scan_uses_station_capture_and_requires_weight(tmp_path, monkeypatch):
+@pytest.mark.parametrize("already_scanned", [False, True])
+def test_requested_scan_uses_station_capture_and_requires_weight(
+    tmp_path, monkeypatch, already_scanned
+):
     from parcel_dimensioner import station_worker
 
     image = pytest.importorskip("PIL.Image")
@@ -269,10 +272,20 @@ def test_requested_scan_uses_station_capture_and_requires_weight(tmp_path, monke
         event("empty")
         event("listening")
 
-        store.create_request("incoming", 120)
-        assert event("capture_request") == "incoming"
-        worker.commands.put("skip")
-        event("skip")
+        if already_scanned:
+            store.create_request("cancelled", 120, barcode_already_scanned=True)
+            assert event("capture_request") == ("cancelled", True)
+            store.request("cancelled", cancel=True)
+            assert event("capture_request") is None
+            assert event("listening") is True
+            worker.commands.put(("manual_id", "STALE-LABEL"))
+            assert event("label")["package_id"] == "STALE-LABEL"
+
+        store.create_request("incoming", 120, barcode_already_scanned=already_scanned)
+        assert event("capture_request") == ("incoming", already_scanned)
+        if not already_scanned:
+            worker.commands.put("skip")
+            event("skip")
         worker.commands.put(worker.begin_measurement("incoming", None))
         assert event("weight_error")[0] == "Unstable weight."
         assert store.request("incoming")["state"] == "pending"
@@ -294,6 +307,7 @@ def test_requested_scan_uses_station_capture_and_requires_weight(tmp_path, monke
         with store.open_image(completed["measurementId"]) as photo:
             assert photo.read(2) == b"\xff\xd8"
         assert measurement["barcodeStatus"] == "skipped"
+        assert "barcode" not in measurement
         assert measurement["weight"]["value"] == 8.5
         assert measurement["dimensions"]["height"] == 10
         assert event("capture_request") is None

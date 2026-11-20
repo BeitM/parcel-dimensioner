@@ -8,18 +8,24 @@ from pathlib import Path
 
 def box_detail(image, result):
     """Display-only crop around the detected box, with nearby wall context."""
+    bounds = box_detail_bounds(image.size, result)
+    return image.crop(bounds) if bounds is not None else image.copy()
+
+
+def box_detail_bounds(size, result):
+    """Return the source-image bounds shared by the touchscreen and API."""
     points = result.get("box_contour_pixels", [])
     points = [p for p in points if len(p) == 2 and all(math.isfinite(v) for v in p)]
     if len(points) < 3:
-        return image.copy()
+        return None
     xs, ys = zip(*points, strict=True)
-    width, height = image.size
+    width, height = size
     # Limit magnification on tiny packages; preserve some wall and floor context.
     span_x = min(width, max(width * 0.3, (max(xs) - min(xs)) * 1.3 + 80))
     span_y = min(height, max(height * 0.3, (max(ys) - min(ys)) * 1.3 + 80))
     left = max(0, min(width - span_x, (min(xs) + max(xs) - span_x) / 2))
     top = max(0, min(height - span_y, (min(ys) + max(ys) - span_y) / 2))
-    return image.crop((round(left), round(top), round(left + span_x), round(top + span_y)))
+    return round(left), round(top), round(left + span_x), round(top + span_y)
 
 
 def draw_box_review(image, result, cv, np, *, show_contour=True):

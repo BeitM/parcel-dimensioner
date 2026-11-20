@@ -85,6 +85,11 @@ at startup and locks that position; keep the wall patterns clearly visible.
    and optional chime.
    Check the displayed ID. Multiple distinct codes require **Choose ID**.
    The app then pauses reading and restores normal station focus/exposure.
+   If the receiving app already scanned the barcode and sends that flag with
+   its capture request, the touchscreen goes straight to **Measure box**.
+   The status panel below the preview highlights incoming requests and gives
+   the next action. When a requested scan is saved, the panel says it is ready
+   for the receiving app. A cancelled or expired request shows an alert.
 4. Put that same box snugly against both walls and remove your hands. Tap
    **Measure box**. The app waits for stable weight, captures the image, and
    verifies weight across capture before calculating dimensions. The preview
@@ -155,7 +160,7 @@ Failed attempts save an `error.txt` and `attempt.json`, plus any images already
 captured. A failure before capture has no box image. Editing an ID regenerates
 `review/scan.jpg`. These runtime files are ignored by Git.
 
-Box Scanner removes station photos, marked images, and change masks 48 hours
+Box Scanner removes station photos, marked images, and change masks two weeks
 after capture, including images from previous station sessions. It checks when
 the app starts and every 10 minutes while it is running. The active empty
 reference, pending label, and current result stay available while in use.

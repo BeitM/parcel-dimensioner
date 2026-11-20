@@ -67,7 +67,7 @@ def test_photo_cleanup_protects_work_in_progress_until_released(tmp_path):
     s.manual_label("PACKAGE-42")
     pending_dir, _ = s.pending_label
     pending = pending_dir / "label.jpg"
-    old_capture = (datetime.now(UTC) - timedelta(hours=49)).isoformat()
+    old_capture = (datetime.now(UTC) - timedelta(days=15)).isoformat()
 
     def backdate(photo):
         sidecar = photo.with_suffix(".json")

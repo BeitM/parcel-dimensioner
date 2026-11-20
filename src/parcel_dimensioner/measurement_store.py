@@ -12,10 +12,12 @@ import time
 from contextlib import closing, contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from io import BytesIO
 from pathlib import Path
 from uuid import uuid4
 
 from parcel_dimensioner.photo_retention import _SCAN, _STATION
+from parcel_dimensioner.review import box_detail_bounds
 
 REQUEST_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 _CURSOR = re.compile(r"([a-f0-9]{32}):(0|[1-9][0-9]{0,18})")
@@ -32,6 +34,7 @@ class ApiError(Exception):
 @dataclass(frozen=True)
 class CaptureAttempt:
     request_id: str | None
+    barcode_already_scanned: bool = False
 
 
 def _utc(timestamp):
@@ -53,6 +56,8 @@ def _request_record(row):
         record["measurementId"] = row["measurement_id"]
     if row["reason"]:
         record["reason"] = row["reason"]
+    if row["barcode_already_scanned"]:
+        record["barcodeAlreadyScanned"] = True
     return record
 
 
@@ -127,7 +132,14 @@ class MeasurementStore:
                 id TEXT UNIQUE NOT NULL, payload TEXT NOT NULL, image_path TEXT)""")
             db.execute("""CREATE TABLE IF NOT EXISTS requests (
                 id TEXT PRIMARY KEY, ttl INTEGER NOT NULL, created REAL NOT NULL,
-                expires REAL NOT NULL, state TEXT NOT NULL, measurement_id TEXT, reason TEXT)""")
+                expires REAL NOT NULL, state TEXT NOT NULL, measurement_id TEXT, reason TEXT,
+                barcode_already_scanned INTEGER NOT NULL DEFAULT 0)""")
+            if "barcode_already_scanned" not in {row["name"] for row in db.execute(
+                "PRAGMA table_info(requests)"
+            )}:
+                db.execute(
+                    "ALTER TABLE requests ADD barcode_already_scanned INTEGER NOT NULL DEFAULT 0"
+                )
             db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS one_active_request
                 ON requests ((1)) WHERE state IN ('pending', 'capturing')""")
             db.execute("INSERT OR IGNORE INTO station VALUES (1, ?, ?)", (device_id, uuid4().hex))
@@ -218,17 +230,20 @@ class MeasurementStore:
             "SELECT * FROM requests WHERE state IN ('pending','capturing')"
         ).fetchone()
 
-    def create_request(self, request_id, ttl):
+    def create_request(self, request_id, ttl, *, barcode_already_scanned=False):
         with self._transaction() as db:
             now = self._clock()
             self._expire(db, now)
             current = db.execute("SELECT * FROM requests WHERE id=?", (request_id,)).fetchone()
             if current is not None:
-                if current["ttl"] != ttl:
+                if (
+                    current["ttl"] != ttl
+                    or bool(current["barcode_already_scanned"]) != barcode_already_scanned
+                ):
                     raise ApiError(
                         409,
                         "request_id_conflict",
-                        "This request ID was used with a different expiry.",
+                        "This request ID was used with different capture options.",
                     )
                 return 200, _request_record(current)
             if self._attempt is not None or self._active(db) is not None:
@@ -246,9 +261,9 @@ class MeasurementStore:
                     "The station needs a ready camera, zeroed scale and free storage.",
                 )
             db.execute(
-                "INSERT INTO requests (id, ttl, created, expires, state) "
-                "VALUES (?, ?, ?, ?, 'pending')",
-                (request_id, ttl, now, now + ttl),
+                "INSERT INTO requests (id, ttl, created, expires, state, barcode_already_scanned) "
+                "VALUES (?, ?, ?, ?, 'pending', ?)",
+                (request_id, ttl, now, now + ttl, barcode_already_scanned),
             )
             return 201, _request_record(self._active(db))
 
@@ -274,11 +289,11 @@ class MeasurementStore:
             raise deferred_error
         return record
 
-    def active_request_id(self):
+    def active_request(self):
         with self._transaction() as db:
             self._expire(db, self._clock())
             row = self._active(db)
-            return row["id"] if row else None
+            return (row["id"], bool(row["barcode_already_scanned"])) if row else None
 
     def begin(self, displayed_request_id):
         # A new request must be visible to the operator before it can claim a tap.
@@ -299,7 +314,7 @@ class MeasurementStore:
                     "request_changed",
                     "Capture request changed. Check the screen and tap Measure again.",
                 )
-            self._attempt = CaptureAttempt(request_id)
+            self._attempt = CaptureAttempt(request_id, bool(row and row["barcode_already_scanned"]))
             return self._attempt
 
     def complete(self, attempt, result, captured_at, *, image_path=None):
@@ -371,6 +386,30 @@ class MeasurementStore:
             except FileNotFoundError:
                 pass  # Retention can remove the photo between lookup and open.
         raise ApiError(410, "image_unavailable", "The box photo is no longer available.")
+
+    def cropped_image(self, measurement_id):
+        from PIL import Image
+
+        unavailable = ApiError(410, "image_unavailable", "The cropped box photo is unavailable.")
+        with self.open_image(measurement_id) as original:
+            record = Path(original.name).with_name("result.json")
+            try:
+                if record.is_symlink() or not record.is_file():
+                    raise unavailable
+                result = json.loads(record.read_text(encoding="utf-8"))
+                if not isinstance(result, dict) or result.get("scan_id") != measurement_id:
+                    raise unavailable
+                with Image.open(original, formats=["JPEG"]) as source:
+                    bounds = box_detail_bounds(source.size, result)
+                    if bounds is None:
+                        raise unavailable
+                    with source.crop(bounds) as crop, BytesIO() as jpeg:
+                        crop.save(jpeg, format="JPEG", quality=95)
+                        return jpeg.getvalue()
+            except (
+                OSError, ValueError, TypeError, OverflowError, Image.DecompressionBombError
+            ) as exc:
+                raise unavailable from exc
 
     def history(self, after, limit):
         position = 0

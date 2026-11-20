@@ -42,6 +42,9 @@ class StationWorker(threading.Thread):
             return session.scan(dimensions_only_reason=payload, skip_barcode=skip_barcode)
         attempt, reason = payload
         try:
+            if attempt.barcode_already_scanned:
+                session.clear_label()
+                skip_barcode = True
             return session.scan(
                 dimensions_only_reason=reason,
                 skip_barcode=skip_barcode,
@@ -54,8 +57,10 @@ class StationWorker(threading.Thread):
         camera, watch = StationCamera(self.settings), BarcodeWatch()
         session = None
         api_server = None
+        failure_event = "fatal"
         next_request_check = 0.0
-        shown_request_id = None
+        shown_request = None
+        use_external_barcode = False
         wanted, active = False, False
         skip_barcode = False
         next_frame = 0
@@ -78,6 +83,7 @@ class StationWorker(threading.Thread):
             session.prune_photos()
             next_cleanup = time.monotonic() + PHOTO_CLEANUP_INTERVAL_SECONDS
             if self.api_settings and self.api_settings.enabled:
+                failure_event = "api_error"
                 self.measurements = MeasurementStore(
                     self.captures_dir / "measurement-history.sqlite3",
                     self.api_settings.device_id,
@@ -85,6 +91,7 @@ class StationWorker(threading.Thread):
                 )
                 api_server = StationApiServer(self.api_settings, self.measurements)
                 api_server.start()
+                failure_event = "fatal"
             self.events.put(("ready", str(session.directory)))
             while not self.stopping.is_set():
                 if time.monotonic() >= next_cleanup:
@@ -161,15 +168,24 @@ class StationWorker(threading.Thread):
                 if self.measurements is not None and time.monotonic() >= next_request_check:
                     next_request_check = time.monotonic() + 0.5
                     try:
-                        request_id = self.measurements.active_request_id()
+                        request = self.measurements.active_request()
                     except sqlite3.Error:
                         pass  # The next measurement and HTTP queries surface storage errors.
                     else:
-                        if request_id != shown_request_id:
-                            shown_request_id = request_id
-                            self.events.put(("capture_request", request_id))
+                        if request != shown_request:
+                            previously_external = use_external_barcode
+                            use_external_barcode = bool(request and request[1])
+                            if use_external_barcode:
+                                suspend()
+                                session.clear_label()
+                            if use_external_barcode or previously_external:
+                                skip_barcode = False
+                                wanted = session.last_scan is None and session.reference is not None
+                            shown_request = request
+                            self.events.put(("capture_request", request))
                 desired = (
                     wanted
+                    and not use_external_barcode
                     and session.reference is not None
                     and session.pending_label is None
                     and not self.paused.is_set()
@@ -231,7 +247,7 @@ class StationWorker(threading.Thread):
                     (session.directory / "camera-error.txt").write_text(
                         traceback.format_exc(), encoding="utf-8"
                     )
-            self.events.put(("fatal", str(exc)))
+            self.events.put((failure_event, str(exc)))
         finally:
             if api_server is not None:
                 api_server.close()

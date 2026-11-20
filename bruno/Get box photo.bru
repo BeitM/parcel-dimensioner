@@ -12,7 +12,7 @@ get {
 
 docs {
   Run **Capture status** after the scan completes to load its measurement ID.
-  The response is the original box JPEG. HTTP 404 means no photo is linked.
-  HTTP 410 means the previously linked photo is gone. The Pi's 48-hour photo
-  cleanup applies to the JPEG and the measurement stays available.
+  The response is a cropped JPEG without overlays. HTTP 404 means no photo is
+  linked. HTTP 410 means the photo or crop is unavailable. The Pi removes
+  station photos after two weeks and the measurement stays available.
 }

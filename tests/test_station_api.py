@@ -4,6 +4,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from http.client import HTTPConnection
+from io import BytesIO
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -135,13 +136,44 @@ def test_api_request_capture_and_poll_history(http_station):
     assert call("GET", "/measurements?after=broken")[0] == 400
 
 
-def test_box_photo_requires_auth_and_survives_only_while_file_is_retained(http_station):
+def test_receiver_can_skip_station_barcode_for_one_request(http_station):
+    store, call = http_station
+    body = {"requestId": "already-read", "barcodeAlreadyScanned": True}
+    assert call("POST", "/capture-requests", {**body, "barcodeAlreadyScanned": "true"})[0] == 400
+    status, pending = call("POST", "/capture-requests", body)
+    assert status == 201 and pending["state"] == "pending"
+    assert pending["barcodeAlreadyScanned"] is True
+    assert call("POST", "/capture-requests", body) == (200, pending)
+    assert call("POST", "/capture-requests", {"requestId": "already-read"})[0] == 409
+    attempt = store.begin("already-read")
+    assert attempt.barcode_already_scanned
+    result = captured_box(skipped=True)
+    store.complete(attempt, result, datetime.now(UTC))
+    completed = call("GET", "/capture-requests/already-read")[1]
+    assert completed["state"] == "completed" and completed["barcodeAlreadyScanned"] is True
+    measurement = call("GET", f"/measurements/{completed['measurementId']}")[1]
+    assert measurement["requestId"] == "already-read"
+    assert measurement["barcodeStatus"] == "skipped" and "barcode" not in measurement
+    assert call("POST", "/capture-requests", {"requestId": "next-box"})[0] == 201
+    assert not store.begin("next-box").barcode_already_scanned
+
+
+def test_box_photo_returns_only_the_raw_crop_while_photo_is_retained(http_station):
+    image = pytest.importorskip("PIL.Image")
     store, call = http_station
     photo = store.path.parent / "station-20261119T222000-a1b2c3d4/scan-0001/box.jpg"
     photo.parent.mkdir(parents=True)
-    jpeg = b"\xff\xd8" + b"captured photo" * 6000 + b"\xff\xd9"
-    photo.write_bytes(jpeg)
+    with image.new("RGB", (1000, 800), "navy") as original:
+        original.paste((220, 50, 30), (400, 250, 600, 550))
+        original.save(photo, format="JPEG")
+    review = photo.parent / "review"
+    review.mkdir()
+    with image.new("RGB", (1000, 800), "lime") as annotated:
+        annotated.save(review / "measurement.jpg", format="JPEG")
     result = captured_box()
+    result["box_contour_pixels"] = [[400, 250], [600, 250], [600, 550], [400, 550]]
+    metadata = photo.with_name("result.json")
+    metadata.write_text(json.dumps(result), encoding="utf-8")
     store.complete(store.begin(None), result, datetime.now(UTC), image_path=photo)
     measurement_path = f"/measurements/{result['scan_id']}"
     image_path = measurement_path + "/image"
@@ -150,11 +182,16 @@ def test_box_photo_requires_auth_and_survives_only_while_file_is_retained(http_s
     assert call("GET", "/measurements")[1]["items"] == [measurement]
     assert call("GET", image_path, token=None)[0] == 401
     status, headers, content = call("GET", image_path, raw=True)
-    assert status == 200 and content == jpeg
+    assert status == 200
     assert headers["Content-Type"] == "image/jpeg"
-    assert headers["Content-Length"] == str(len(jpeg))
+    assert headers["Content-Length"] == str(len(content))
     assert headers["Cache-Control"] == "no-store"
+    with image.open(BytesIO(content)) as crop:
+        assert crop.size == (340, 470)
+        assert crop.getpixel((170, 235)) == pytest.approx((220, 50, 30), abs=5)
 
+    metadata.write_text(json.dumps({**result, "box_contour_pixels": []}), encoding="utf-8")
+    assert call("GET", image_path)[0] == 410
     photo.unlink()
     status, missing = call("GET", image_path)
     assert status == 410 and missing["error"]["code"] == "image_unavailable"
@@ -169,9 +206,11 @@ def test_upgrade_links_only_retained_box_photos_to_existing_measurements(tmp_pat
     missing = captured_box()
     old.complete(old.begin(None), retained, datetime.now(UTC))
     old.complete(old.begin(None), missing, datetime.now(UTC))
+    old.create_request("legacy-request", 120)
     cursor = old.history(None, 100)["nextCursor"]
     with sqlite3.connect(db) as connection:
         connection.execute("ALTER TABLE measurements DROP COLUMN image_path")
+        connection.execute("ALTER TABLE requests DROP COLUMN barcode_already_scanned")
 
     folder = tmp_path / "station-20261119T222000-a1b2c3d4/scan-0001"
     folder.mkdir(parents=True)
@@ -179,6 +218,9 @@ def test_upgrade_links_only_retained_box_photos_to_existing_measurements(tmp_pat
     (folder / "box.jpg").write_bytes(b"original box photo")
     (folder / "label.jpg").write_bytes(b"close-up label photo")
     upgraded = station(db)
+    legacy = upgraded.request("legacy-request")
+    assert legacy["state"] == "interrupted" and "barcodeAlreadyScanned" not in legacy
+    assert upgraded.create_request("legacy-request", 120) == (200, legacy)
     retained_id, missing_id = retained["scan_id"], missing["scan_id"]
     assert upgraded.measurement(retained_id)["imageUrl"].endswith(f"/{retained_id}/image")
     with upgraded.open_image(retained_id) as image:

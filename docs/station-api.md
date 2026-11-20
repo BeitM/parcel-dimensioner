@@ -76,9 +76,11 @@ Invoke-RestMethod -Method Post -Uri "$api/capture-requests" -Headers $auth -Cont
 
 On the Pi, verify that **Capture requested** appears. If a previous result is
 open, tap **Next box**. Hold the label in front of the camera until it reads,
-choose a code if prompted, or tap **Continue without barcode**. Place the same
-box against both walls, remove your hands, then tap **Measure box** before the
-request expires. After the station saves the result, run the following.
+choose a code if prompted, or tap **Continue without barcode**. If the request
+already specifies that the receiving app scanned the label, the Pi goes
+straight to **Measure box**. Place the box against both walls, remove your
+hands, then tap **Measure box** before the request expires. After the station
+saves the result, run the following.
 
 ```powershell
 $request = Invoke-RestMethod -Uri "$api/capture-requests/$id" -Headers $auth
@@ -111,7 +113,8 @@ has this shape.
 If the measurement includes `imageUrl`, download its box photo with the same
 bearer token. The URL is relative to the API server's origin. In the laptop
 test, `$api` already includes `/api/v1`, so this command builds the equivalent
-URL from the measurement ID and saves the original JPEG.
+URL from the measurement ID and saves the cropped JPEG. The crop uses the same
+framing as **Box detail** and comes from the camera photo without any overlays.
 
 ```powershell
 Invoke-WebRequest -Uri "$api/measurements/$($request.measurementId)/image" `
@@ -143,11 +146,11 @@ or address covered by the certificate and a trust chain it can validate. Use
 | Method and path under `/api/v1` | Behavior |
 | --- | --- |
 | `GET /health` | `ready` indicates whether a new request can be accepted. Check `captureState`, `activeRequestId`, `storageAvailable`, and `clockSynchronized` when diagnosing the station. |
-| `POST /capture-requests` | Accepts one reservation at a time. `expiresInSeconds` defaults to 120 and accepts 10–600. A new reservation returns 201. Replaying the original ID and parameters returns 200 with its current state. |
+| `POST /capture-requests` | Accepts one reservation at a time. `expiresInSeconds` defaults to 120 and accepts 10–600. Optional `barcodeAlreadyScanned: true` skips station barcode capture. A new reservation returns 201. Replaying the original ID and parameters returns 200 with its current state. |
 | `GET /capture-requests/{requestId}` | Returns `pending`, `capturing`, `completed`, `cancelled`, `expired`, or `interrupted`. Use the completed request’s `measurementId` to fetch the result. |
 | `POST /capture-requests/{requestId}/cancel` | Cancels a pending request. Repeating a successful cancellation returns the same terminal state. A capture already in progress returns 409. |
 | `GET /measurements/{measurementId}` | Returns one immutable measurement. |
-| `GET /measurements/{measurementId}/image` | Returns the original box photo as `image/jpeg`. HTTP 404 means the ID is unknown or the measurement has no linked photo. HTTP 410 `image_unavailable` means a previously linked photo is gone. |
+| `GET /measurements/{measurementId}/image` | Returns the cropped box photo without overlays as `image/jpeg`. HTTP 404 means the ID is unknown or the measurement has no linked photo. HTTP 410 `image_unavailable` means the linked photo or its crop is unavailable. |
 | `GET /measurements?after={cursor}&limit=100` | Returns `items`, `nextCursor`, and `hasMore` in insertion order. Limit accepts 1–500. Begin without `after`. |
 
 Save the request ID and draft association before posting. After a network
@@ -155,6 +158,12 @@ timeout, GET that request ID or retry with the same ID and parameters. Errors
 have an `error` object with `code` and `message`. A different active request or
 capture returns 409 `device_busy`. Reusing an ID with different parameters
 returns 409 `request_id_conflict`.
+
+If the receiving app already scanned a barcode, include the boolean
+`"barcodeAlreadyScanned": true` when creating a new request. The flag defaults
+to `false`. The completed measurement reports `barcodeStatus: "skipped"` for
+the Pi's scan. Keep the receiving app's barcode on the draft and associate
+the returned measurement by `requestId`.
 
 Deduplicate records by `deviceId` and `measurementId`. Check `hasMore` to keep
 paging, and save `nextCursor` only after persisting the whole page. If a
@@ -182,10 +191,10 @@ unassigned inbox. This version uses polling.
 - The SQLite database is `data/captures/measurement-history.sqlite3` with the
   default captures directory. It retains requests and measurements without
   automatic expiry of completed history. `imageUrl` is included on measurements
-  with a linked box photo. The API serves that existing JPEG while it is on the
-  Pi, subject to the 48-hour photo cleanup. The measurement stays available
-  after the photo is removed. On upgrade, the station links earlier API
-  measurements to retained box photos by their saved scan IDs.
+  with a linked box photo. The API creates the crop on request from the saved
+  photo. The Pi removes station photos after two weeks. The measurement stays
+  available after the photo is removed. On upgrade, the station links earlier
+  API measurements to retained box photos by their saved scan IDs.
 - After a restart, the station marks any unfinished requests `interrupted`.
   Completed records and history cursors persist. Capture the empty station
   again before accepting new requests. When disk space drops below 32 MiB,

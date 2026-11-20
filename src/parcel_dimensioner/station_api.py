@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import hmac
 import json
-import os
 import re
-import shutil
 import sqlite3
 import ssl
 import subprocess
@@ -71,12 +69,12 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _send_image(self, measurement_id):
-        with self.server.store.open_image(measurement_id) as image:
-            size = os.fstat(image.fileno()).st_size
-            # Headers are committed once streaming starts. A disconnected client can retry.
-            with suppress(OSError):
-                self._send_headers(200, "image/jpeg", size)
-                shutil.copyfileobj(image, self.wfile, length=64 * 1024)
+        with self.server.image_render_lock:
+            jpeg = self.server.store.cropped_image(measurement_id)
+        # Headers are committed once the response starts. A disconnected client can retry.
+        with suppress(OSError):
+            self._send_headers(200, "image/jpeg", len(jpeg))
+            self.wfile.write(jpeg)
 
     def _handle(self, method):
         try:
@@ -130,16 +128,27 @@ class _Handler(BaseHTTPRequestHandler):
         store = self.server.store
         if method == "POST" and path == "/api/v1/capture-requests":
             body = self._json_body()
-            if not isinstance(body, dict) or body.keys() - {"requestId", "expiresInSeconds"}:
-                raise _invalid("Supply requestId and optionally expiresInSeconds.")
+            if not isinstance(body, dict) or body.keys() - {
+                "requestId",
+                "expiresInSeconds",
+                "barcodeAlreadyScanned",
+            }:
+                raise _invalid(
+                    "Supply requestId and optionally expiresInSeconds and barcodeAlreadyScanned."
+                )
             request_id, ttl = body.get("requestId"), body.get("expiresInSeconds", 120)
+            barcode_already_scanned = body.get("barcodeAlreadyScanned", False)
             if not isinstance(request_id, str) or not REQUEST_ID.fullmatch(request_id):
                 raise _invalid(
                     "requestId must use 1 to 128 letters, numbers, hyphens or underscores."
                 )
             if type(ttl) is not int or not 10 <= ttl <= 600:
                 raise _invalid("expiresInSeconds must be an integer from 10 to 600.")
-            return store.create_request(request_id, ttl)
+            if type(barcode_already_scanned) is not bool:
+                raise _invalid("barcodeAlreadyScanned must be true or false.")
+            return store.create_request(
+                request_id, ttl, barcode_already_scanned=barcode_already_scanned
+            )
         if request := _REQUEST.fullmatch(path):
             request_id, cancel = request.groups()
             if not REQUEST_ID.fullmatch(request_id):
@@ -174,6 +183,7 @@ class _Handler(BaseHTTPRequestHandler):
 class _Server(ThreadingHTTPServer):
     def __init__(self, address, store, token, tls):
         self.store = store
+        self.image_render_lock = threading.Lock()
         self.authorization = f"Bearer {token}".encode("ascii")
         self.tls = tls
         try:
